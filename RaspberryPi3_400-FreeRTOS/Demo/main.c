@@ -12,6 +12,7 @@
 #include "max7219.h"
 #include "font5x7.h"
 #include "fb.h"
+#include "qrcodegen.h"
 #include "pwm.h"
 #include "stepper.h"
 #include "semphr.h"
@@ -61,6 +62,19 @@ static const uint32_t BAR_COL[8] = {
 static uint32_t g_secs   = 12*3600;
 static char     g_msg[MSG_LENGTH]= "RASPBERRY PI 3|400 FREERTOS 64-BIT BAREMETAL DEMO";  // WAS 100 MSG_LENGTH
 static int      g_bright = MAT_INTENSITY;
+
+/* ---- QR-on-HDMI feature (driven by the 'qr <text>' / 'qr off' command) ----
+ * The UART parser fills g_qr_text and raises g_qr_req; the HDMI task owns the
+ * framebuffer, so it does the encode + paint. Single writer per field + the
+ * request flag set last = safe hand-off, matching the rest of this file's
+ * volatile-global style.                                                     */
+#define QR_MAXVER  10     /* up to 57x57 modules: fits URLs / long marquees    */
+#define QR_QUIET   4      /* quiet-zone width in modules (QR spec minimum)      */
+static uint8_t  g_qr_buf[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAXVER)];
+static uint8_t  g_qr_tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAXVER)];
+static char     g_qr_text[160];   /* payload to encode (set by the parser)     */
+volatile int    g_qr_req = 0;     /* 0 idle, 1 = show pending, 2 = clear pending*/
+volatile int    g_qr_on  = 0;     /* 1 = QR currently on the HDMI screen        */
 
 /* ---- prayer schedule (set over serial by the ESP32) ------------------- */
 #define NPRAYER 6
@@ -133,7 +147,7 @@ static void vClockOwner(void *pv)
                 sec_acc = xTaskGetTickCount();
                 uart_puts("ok time\r\n");
                 break;
-            case CMD_MSG:;
+            case CMD_MSG:
                 int i = 0;
                 for(; cmd.text[i] && i < (int)sizeof(g_msg)-1; i++) g_msg[i] = cmd.text[i];
                 g_msg[i] = 0;                                  // MAX7219 source
@@ -234,6 +248,76 @@ static void vSweep(void *pv)
 }
 
 /* ======================================================================= */
+/* ---- QR painters: shared encode + blit, then full-screen and small modes -- */
+/* Encode g_qr_text into g_qr_buf; returns module count n, or 0 on failure.   */
+static int qr_encode(void)
+{
+    if(!qrcodegen_encodeText(g_qr_text, g_qr_tmp, g_qr_buf,
+                             qrcodegen_Ecc_MEDIUM, qrcodegen_VERSION_MIN, QR_MAXVER,
+                             qrcodegen_Mask_AUTO, true))
+        return 0;                                   /* text too long for QR_MAXVER */
+    return qrcodegen_getSize(g_qr_buf);
+}
+
+/* Paint the encoded QR as black modules on a white quiet-zone field: top-left  */
+/* at (ox,oy), 's' pixels per module. Scannable by any phone camera.            */
+static void qr_blit(int ox, int oy, int s, int n)
+{
+    const uint32_t WHITE = RGB(255,255,255), BLACK = RGB(0,0,0);
+    int side = (n + 2*QR_QUIET) * s;
+    fb_fill(ox, oy, side, side, WHITE);             /* white field incl. quiet zone*/
+    for(int y=0; y<n; y++)
+        for(int x=0; x<n; x++)
+            if(qrcodegen_getModule(g_qr_buf, x, y))
+                fb_fill(ox + (QR_QUIET+x)*s, oy + (QR_QUIET+y)*s, s, s, BLACK);
+}
+
+/* Full-screen QR: clears the screen and centers the code with a caption.       */
+static int qr_paint_full(void)
+{
+    int n = qr_encode(); if(!n) return 0;
+    int units = n + 2*QR_QUIET;
+    int W = (int)fb_width(), H = (int)fb_height();
+    int avail = (W < H ? W : H) - 96;
+    int s = avail / units; if(s < 2) s = 2;
+    int side = units * s;
+    int ox = (W - side)/2;
+    int oy = (H - side)/2 - 24; if(oy < 0) oy = 0;
+
+    fb_clear(RGB(0,0,0));
+    qr_blit(ox, oy, s, n);
+    char cap[49]; int ci=0;
+    for(; g_qr_text[ci] && ci<48; ci++) cap[ci]=g_qr_text[ci];
+    cap[ci]=0;
+    fb_text((W - fb_text_w(cap,2))/2, oy + side + 18, cap, 2, RGB(0,220,255));
+    return 1;
+}
+
+/* Small QR: lives in the empty band between the colour bar (~y348) and the     */
+/* marquee (y600), so the clock dashboard keeps running around it.              */
+#define QR_BAND_TOP 360
+#define QR_BAND_BOT 590
+static void qr_band_clear(void)
+{
+    fb_fill(0, QR_BAND_TOP, (int)fb_width(), QR_BAND_BOT - QR_BAND_TOP, RGB(0,0,0));
+}
+static int qr_paint_small(void)
+{
+    int n = qr_encode(); if(!n) return 0;
+    int units = n + 2*QR_QUIET;
+    int W = (int)fb_width();
+    int availh = QR_BAND_BOT - QR_BAND_TOP;
+    int s = availh / units; if(s < 2) s = 2;
+    int side = units * s;
+    int ox = (W - side)/2;
+    int oy = QR_BAND_TOP + (availh - side)/2; if(oy < QR_BAND_TOP) oy = QR_BAND_TOP;
+
+    qr_band_clear();                                /* erase any previous small QR */
+    qr_blit(ox, oy, s, n);
+    return 1;
+}
+
+/* ======================================================================= */
 static void vHdmi(void *pv)
 {
     (void)pv;
@@ -250,6 +334,32 @@ static void vHdmi(void *pv)
     char prev[9]={0}; int prev_sweep=-2; uint32_t msx=0;
     fb_marquee_set(g_msg); 
     for(;;){
+        /* QR feature: full-screen / small (overlay) variants, plus clear        */
+        int qr_rq = g_qr_req;
+        if(qr_rq){
+            g_qr_req = 0;
+            if(qr_rq == 2){                          /* hide whatever QR is shown    */
+                if(g_qr_on == 1){                    /* was full screen: rebuild GUI */
+                    fb_clear(BLACK); fb_clock_reset();
+                    prev[0] = 0; prev_sweep = -2; fb_marquee_set(g_msg);
+                } else if(g_qr_on == 2){             /* was small: clear its band    */
+                    qr_band_clear();
+                }
+                g_qr_on = 0;
+            } else if(qr_rq == 1){                   /* full-screen QR               */
+                if(qr_paint_full()) g_qr_on = 1;
+                else uart_puts("qr: encode failed (text too long?)\r\n");
+            } else if(qr_rq == 3){                   /* small QR overlaid on the GUI */
+                if(g_qr_on == 1){                    /* coming from full: restore GUI */
+                    fb_clear(BLACK); fb_clock_reset();
+                    prev[0] = 0; prev_sweep = -2; fb_marquee_set(g_msg);
+                }
+                if(qr_paint_small()) g_qr_on = 2;
+                else uart_puts("qr: encode failed (text too long?)\r\n");
+            }
+        }
+        if(g_qr_on == 1){ vTaskDelay(pdMS_TO_TICKS(50)); continue; }  /* full QR holds, GUI hidden */
+
         uint32_t s=g_secs; int hh=s/3600, mm=(s/60)%60, ss=s%60; char t[9];
         t[0]='0'+hh/10; t[1]='0'+hh%10; t[2]=':'; t[3]='0'+mm/10; t[4]='0'+mm%10; t[5]=':';
         t[6]='0'+ss/10; t[7]='0'+ss%10; t[8]=0;
@@ -355,6 +465,9 @@ static void print_help(void)
     uart_puts("  set HH:MM[:SS]          set/sync clock (NTP)\r\n");
     uart_puts("  time                   show status\r\n");
     uart_puts("  msg <text>             marquee message\r\n");
+    uart_puts("  qrfull <text>          full-screen QR on HDMI (alias: qr)\r\n");
+    uart_puts("  qrsmall <text>         small QR between bar & marquee\r\n");
+    uart_puts("  qr off                 hide QR, back to clock\r\n");
     uart_puts("  run | stop             sweep on/off\r\n");
     uart_puts("  speed <20-1000>        sweep frame ms\r\n");
     uart_puts("  leds <0-255>           manual LED mask (0=auto sweep)\r\n");
@@ -370,6 +483,18 @@ static void print_help(void)
     uart_puts("  pray <NAME> <HH:MM>    announce a prayer now\r\n");
     uart_puts("  prayerclr | list       clear / list prayers\r\n");
     uart_puts("  machine on|off         suppress echo/prompt (ESP32 link)\r\n");
+}
+
+/* Shared 'qr' handling: 'off'/'clear' hides any QR; otherwise the rest of the
+ * line is the payload. showreq = 1 (full screen) or 3 (small overlay).        */
+static void qr_request(const char *p, int showreq)
+{
+    const char *q = p; char a[8]; word(&q, a, sizeof a);
+    if(seq(a,"off") || seq(a,"clear")){ g_qr_req = 2; uart_puts("ok qr off\r\n"); return; }
+    int i=0; while(p[i] && i<(int)sizeof(g_qr_text)-1){ g_qr_text[i]=p[i]; i++; }
+    g_qr_text[i]=0;
+    if(!i){ uart_puts("err empty\r\n"); return; }
+    g_qr_req = showreq; uart_puts("ok qr\r\n");
 }
 
 static void parse_line(char *line)
@@ -388,6 +513,10 @@ static void parse_line(char *line)
     } else if(seq(cw,"msg")){
         cmd_t c; c.type=CMD_MSG; int i=0; while(*p && i<MSG_LENGTH) c.text[i++]=*p++; c.text[i]=0;
         if(!i){ uart_puts("err empty\r\n"); return; } xQueueSend(g_cmdq,&c,0);
+    } else if(seq(cw,"qr") || seq(cw,"qrfull")){
+        qr_request(p, 1);          /* full-screen QR (qr = alias for qrfull)        */
+    } else if(seq(cw,"qrsmall")){
+        qr_request(p, 3);          /* small QR in the band between bar and marquee  */
     } else if(seq(cw,"run")){
         g_sweep_run=1; uart_puts("ok run\r\n");
     } else if(seq(cw,"stop")){

@@ -33,6 +33,7 @@ int  fb_text8_w(const char *s, int sc);
  * wider than the screen. Only repaints when the text changes, so it is cheap
  * to call every loop. 'bg' is used to erase the previous frame's band. */
 void fb_clock_big(const char *t, uint32_t fg, uint32_t bg);
+void fb_clock_reset(void);  /* force a full clock repaint next call */
 
 /* --- scrolling message ticker (loops, re-enters from the right) -------- */
 /* Set text (<=100 chars); call draw periodically at your scroll cadence. */

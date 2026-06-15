@@ -26,6 +26,7 @@ OBJS +=build/spi.o
 OBJS +=build/tm1637.o
 OBJS +=build/max7219.o
 OBJS +=build/fb.o
+OBJS +=build/qrcodegen.o
 OBJS +=build/font.o
 OBJS +=build/font8x8.o
 OBJS +=build/irqctrl.o

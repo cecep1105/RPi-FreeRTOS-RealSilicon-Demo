@@ -173,10 +173,17 @@ static void mtx_char(int x,int y,char ch,int cell,int dotr,uint32_t fg,uint32_t 
 /* Dot-matrix clock, centered, ~1/4 screen height (shrinks only to fit width).
  * Repaints only changed cells. Pass a space in a colon slot ("12 34") to blink
  * the colon without disturbing layout. Call with fg = RGB(255,0,0) for red. */
+/* Invalidate the incremental-redraw cache so the next fb_clock_big() fully
+ * repaints every dot. Call right after clearing the screen (e.g. when leaving
+ * the QR view) so digits whose value did not change are not left blank. */
+static int g_clock_force = 0;
+void fb_clock_reset(void){ g_clock_force = 1; }
+
 void fb_clock_big(const char *s, uint32_t fg, uint32_t bg)
 {
     static char last[16]={0};
     static int  pCell=-1, px0=0, py0=0, pH=0, pW=0;
+    if(g_clock_force){ pCell=-1; last[0]=0; g_clock_force=0; }  /* force full repaint */
 
     int n=0; while(s[n]) n++;
     const int CHW = 6;                          /* 5 cols + 1 col gap, in cells */
