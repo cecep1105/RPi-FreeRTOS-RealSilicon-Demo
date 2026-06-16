@@ -32,12 +32,11 @@ static void  up_dec(uint32_t v){ char b[11]; int i=10; b[10]=0; if(!v){uart_puts
 static void  up_hex(uint64_t v){ uart_puts("0x"); for(int i=7;i>=0;i--){ uint32_t n=(v>>(i*4))&0xF; uart_putc(n<10?(48+n):(55+n)); } }
 
 /* ---- command channel: parser -> clock owner --------------------------- */
-typedef enum { CMD_SETTIME, CMD_MSG, CMD_BRIGHT, CMD_QUERY, CMD_PRAYER, CMD_PRAYCLR, CMD_LIST } cmdtype_t;
+typedef enum { CMD_SETTIME, CMD_MSG, CMD_NETMSG, CMD_BRIGHT, CMD_QUERY, CMD_PRAYER, CMD_PRAYCLR, CMD_LIST } cmdtype_t;
 typedef struct { cmdtype_t type; int a, b, c; char text[101]; } cmd_t;
 static QueueHandle_t g_cmdq;
 
 /* ---- shared display/sweep state --------------------------------------- */
-static const uint8_t SWEEP[8] = { 4, 17, 18, 27, 22, 23, 24, 25 };
 volatile uint8_t g_led_display = 0;   /* current 8-LED state (sweep or manual) */
 volatile uint8_t g_led_mask    = 0;   /* manual override mask; 0 = auto sweep      */
 volatile int g_servo_deg   = 90;  /* current servo angle 0..180                */
@@ -76,6 +75,23 @@ static char     g_qr_text[160];   /* payload to encode (set by the parser)     *
 volatile int    g_qr_req = 0;     /* 0 idle, 1 = show pending, 2 = clear pending*/
 volatile int    g_qr_on  = 0;     /* 1 = QR currently on the HDMI screen        */
 
+/* ---- Panel button: enable/disable WebSocket/marquee messages on the displays
+ * Momentary push button on GPIO21 (40-pin header pin 40) to GND, active LOW.
+ * The Pi's internal pull-up is enabled (the gpio driver handles both Pi 3 and
+ * Pi 400), so NO external resistor is needed. Each press toggles whether
+ * incoming 'msg' commands -- which in normal use arrive from the ESP32
+ * WebSocket bridge -- update the MAX7219 matrix and the HDMI marquee. The
+ * WebSocket link on the ESP32 keeps running either way; this only gates the
+ * display.                                                                    */
+#define BTN_MSG_PIN  21
+/* The "base" marquee shown when WebSocket messages are gated off: the last
+ * manual 'msg' (uppercased) or this default at boot. WebSocket 'netmsg' text
+ * never changes it, so toggling the button cleanly reveals/hides WS content. */
+static char     g_base_msg[MSG_LENGTH] =
+    "RASPBERRY PI 3|400 FREERTOS 64-BIT BAREMETAL DEMO";
+volatile int    g_msg_show       = 1;  /* 1 = show WebSocket (netmsg) messages    */
+volatile int    g_msg_show_dirty = 0;  /* set by the button task, serviced by clock */
+
 /* ---- prayer schedule (set over serial by the ESP32) ------------------- */
 #define NPRAYER 6
 typedef struct { char name[12]; int hhmm; int valid; } prayer_t;
@@ -110,7 +126,7 @@ static int build_ticker(char *dst, uint32_t secs, const char *msg)
     dst[n++]='0'+mm/10; dst[n++]='0'+mm%10; dst[n++]=':';
     dst[n++]='0'+ss/10; dst[n++]='0'+ss%10;
     dst[n++]=' '; dst[n++]=' '; dst[n++]=' ';
-    for(int i=0; msg[i] && n<(MSG_LENGTH + 11); i++) dst[n++]=upc(msg[i]);
+    for(int i=0; msg[i] && n<(MSG_LENGTH + 11); i++) dst[n++]=msg[i];  /* case set by caller */
     dst[n++]=' '; dst[n++]=' '; dst[n++]=' ';
     dst[n]=0;
     return n;
@@ -147,16 +163,29 @@ static void vClockOwner(void *pv)
                 sec_acc = xTaskGetTickCount();
                 uart_puts("ok time\r\n");
                 break;
-            case CMD_MSG:
+            case CMD_MSG: {            /* manual message: UPPERCASED, never gated */
+                int i = 0;
+                for(; cmd.text[i] && i < (int)sizeof(g_msg)-1; i++) g_msg[i] = upc(cmd.text[i]);
+                g_msg[i] = 0;
+                for(i=0; g_msg[i] && i < (int)sizeof(g_base_msg)-1; i++) g_base_msg[i] = g_msg[i];
+                g_base_msg[i] = 0;                              // remember as the base marquee
+                tlen = build_ticker(ticker, g_secs, g_msg);
+                twpx = tlen * (FONT_W + 1);
+                sx   = 0;
+                last_built_sec = 0xFFFFFFFF;
+                fb_marquee_set(g_msg);                          // HDMI ticker (uppercased)
+                break; }
+            case CMD_NETMSG: {         /* WebSocket message: original case, gated by button */
+                if(!g_msg_show) break;                          // gated off -> drop, keep base
                 int i = 0;
                 for(; cmd.text[i] && i < (int)sizeof(g_msg)-1; i++) g_msg[i] = cmd.text[i];
-                g_msg[i] = 0;                                  // MAX7219 source
-                tlen = build_ticker(ticker, g_secs, g_msg);    // rebuild matrix ticker now
+                g_msg[i] = 0;
+                tlen = build_ticker(ticker, g_secs, g_msg);
                 twpx = tlen * (FONT_W + 1);
-                sx   = 0;                                       // restart matrix scroll
-                last_built_sec = 0xFFFFFFFF;                    // let periodic rebuild pick it up too
-                fb_marquee_set(cmd.text);                       // HDMI ticker
-                break;
+                sx   = 0;
+                last_built_sec = 0xFFFFFFFF;
+                fb_marquee_set(g_msg);                          // HDMI ticker (case preserved)
+                break; }
             case CMD_BRIGHT:
                 g_bright = cmd.a & 0x0F; max_all(0x0A,(uint8_t)g_bright);
                 uart_puts("ok bright\r\n");
@@ -192,6 +221,24 @@ static void vClockOwner(void *pv)
             last_built_sec = 0xFFFFFFFF;   /* force rebuild */
         }
 
+        /* panel button toggled the WS/marquee message gate */
+        if(g_msg_show_dirty){
+            g_msg_show_dirty = 0;
+            if(g_msg_show){
+                uart_puts("msg display: ON\r\n");
+            } else {
+                /* revert to the base marquee so WS notifications disappear now */
+                int i=0; for(; g_base_msg[i] && i<(int)sizeof(g_msg)-1; i++) g_msg[i]=g_base_msg[i];
+                g_msg[i]=0;
+                tlen = build_ticker(ticker, g_secs, g_msg);
+                twpx = tlen * (FONT_W + 1);
+                sx = 0;
+                last_built_sec = 0xFFFFFFFF;
+                fb_marquee_set(g_msg);
+                uart_puts("msg display: OFF\r\n");
+            }
+        }
+
         TickType_t now = xTaskGetTickCount();
         while((TickType_t)(now - sec_acc) >= pdMS_TO_TICKS(1000)){
             sec_acc += pdMS_TO_TICKS(1000);
@@ -222,25 +269,67 @@ static void vClockOwner(void *pv)
 }
 
 /* ======================================================================= */
+/* LED-sweep output backend (build-time switchable)                          */
+/*   make                -> 74HC595 shift register, 3 GPIOs (default)         */
+/*   make LEDSWEEP=FULL   -> 8 direct GPIOs (original wiring)                 */
+/* The Makefile passes -DLEDSWEEP_FULL for the 8-pin build. Both expose the   */
+/* same led_out_init()/led_out_write(bits) so vSweep stays backend-agnostic.  */
+/* bit k of 'bits' = LED k (bit0 = first LED).                                */
+#ifdef LEDSWEEP_FULL
+/* ---- 8 direct GPIOs ---- */
+static const uint8_t SWEEP[8] = { 4, 17, 18, 27, 22, 23, 24, 25 };
+static void led_out_init(void){
+    for(int k=0;k<8;k++){ gpio_set_function(SWEEP[k],GPIO_FUNC_OUTPUT); gpio_clear(1u<<SWEEP[k]); }
+}
+static void led_out_write(uint8_t bits){
+    uint32_t set=0, clr=0;
+    for(int k=0;k<8;k++){ if(bits&(1u<<k)) set|=(1u<<SWEEP[k]); else clr|=(1u<<SWEEP[k]); }
+    gpio_set(set); gpio_clear(clr);
+}
+#else
+/* ---- 74HC595 serial-in / 8 parallel-out (3 GPIOs) ----
+ * Wire: DATA->DS(14), CLOCK->SHCP(11), LATCH->STCP(12); OE(13)->GND,
+ *       SRCLR/MR(10)->3V3; outputs Q0..Q7(15,1..7) -> LEDs.                  */
+#define HC595_DATA   17   /* DS   -> 74HC595 pin 14 */
+#define HC595_CLOCK  27   /* SHCP -> 74HC595 pin 11 */
+#define HC595_LATCH  22   /* STCP -> 74HC595 pin 12 */
+static void led_out_init(void){
+    gpio_set_function(HC595_DATA,  GPIO_FUNC_OUTPUT);
+    gpio_set_function(HC595_CLOCK, GPIO_FUNC_OUTPUT);
+    gpio_set_function(HC595_LATCH, GPIO_FUNC_OUTPUT);
+    gpio_clear((1u<<HC595_DATA)|(1u<<HC595_CLOCK)|(1u<<HC595_LATCH));
+}
+static void led_out_write(uint8_t bits){
+    for(int k=7;k>=0;k--){                       /* MSB first -> Qk = bit k     */
+        if(bits&(1u<<k)) gpio_set(1u<<HC595_DATA); else gpio_clear(1u<<HC595_DATA);
+        delay_us(1);
+        gpio_set(1u<<HC595_CLOCK);  delay_us(1);  /* SHCP rising: shift bit in   */
+        gpio_clear(1u<<HC595_CLOCK);
+    }
+    gpio_set(1u<<HC595_LATCH);  delay_us(1);      /* STCP rising: latch to output*/
+    gpio_clear(1u<<HC595_LATCH);
+}
+#endif
+
+/* ======================================================================= */
 static void vSweep(void *pv)
 {
     (void)pv; int i=0, dir=1;
     for(;;){
         uint8_t mask = g_led_mask;
         if(mask){
-            uint32_t set=0, clr=0;
-            for(int k=0;k<8;k++){ if(mask&(1u<<k)) set|=(1u<<SWEEP[k]); else clr|=(1u<<SWEEP[k]); }
-            gpio_set(set); gpio_clear(clr);
+            led_out_write(mask);
             g_led_display = mask;
             vTaskDelay(pdMS_TO_TICKS(60));
         } else if(g_sweep_run){
-            for(int k=0;k<8;k++) gpio_clear(1u<<SWEEP[k]);
-            gpio_set(1u<<SWEEP[i]); g_led_display = (uint8_t)(1u<<i);
+            uint8_t bits = (uint8_t)(1u<<i);
+            led_out_write(bits);
+            g_led_display = bits;
             i += dir; if(i>=7) dir=-1; else if(i<=0) dir=1;
             int ms = g_sweep_ms; if(ms<20) ms=20; if(ms>1000) ms=1000;
             vTaskDelay(pdMS_TO_TICKS(ms));
         } else {
-            for(int k=0;k<8;k++) gpio_clear(1u<<SWEEP[k]);
+            led_out_write(0);
             g_led_display = 0;
             vTaskDelay(pdMS_TO_TICKS(100));
         }
@@ -464,7 +553,8 @@ static void print_help(void)
     uart_puts("commands:\r\n");
     uart_puts("  set HH:MM[:SS]          set/sync clock (NTP)\r\n");
     uart_puts("  time                   show status\r\n");
-    uart_puts("  msg <text>             marquee message\r\n");
+    uart_puts("  msg <text>             marquee message (shown UPPERCASE, always)\r\n");
+    uart_puts("  netmsg <text>          marquee message (orig case; button can gate)\r\n");
     uart_puts("  qrfull <text>          full-screen QR on HDMI (alias: qr)\r\n");
     uart_puts("  qrsmall <text>         small QR between bar & marquee\r\n");
     uart_puts("  qr off                 hide QR, back to clock\r\n");
@@ -511,7 +601,10 @@ static void parse_line(char *line)
     } else if(seq(cw,"time")){
         cmd_t c; c.type=CMD_QUERY; xQueueSend(g_cmdq,&c,0);
     } else if(seq(cw,"msg")){
-        cmd_t c; c.type=CMD_MSG; int i=0; while(*p && i<MSG_LENGTH) c.text[i++]=*p++; c.text[i]=0;
+        cmd_t c; c.type=CMD_MSG; int i=0; while(*p && i<(int)sizeof(c.text)-1) c.text[i++]=*p++; c.text[i]=0;
+        if(!i){ uart_puts("err empty\r\n"); return; } xQueueSend(g_cmdq,&c,0);
+    } else if(seq(cw,"netmsg")){
+        cmd_t c; c.type=CMD_NETMSG; int i=0; while(*p && i<(int)sizeof(c.text)-1) c.text[i++]=*p++; c.text[i]=0;
         if(!i){ uart_puts("err empty\r\n"); return; } xQueueSend(g_cmdq,&c,0);
     } else if(seq(cw,"qr") || seq(cw,"qrfull")){
         qr_request(p, 1);          /* full-screen QR (qr = alias for qrfull)        */
@@ -600,11 +693,36 @@ static void vUartCmd(void *pv)
 }
 
 /* ======================================================================= */
+/* ======================================================================= */
+/* Panel button: debounced, active-LOW on BTN_MSG_PIN with internal pull-up.  */
+/* Each press toggles g_msg_show; the clock task services the change.         */
+static void vButton(void *pv)
+{
+    (void)pv;
+    gpio_set_function(BTN_MSG_PIN, GPIO_FUNC_INPUT);
+    gpio_set_pull(BTN_MSG_PIN, GPIO_PULL_UP);   /* idle HIGH; button pulls to GND */
+    int last = 1, stable = 1, cnt = 0;
+    for(;;){
+        int raw = gpio_read(BTN_MSG_PIN);
+        if(raw != last){ last = raw; cnt = 0; }     /* bounce: restart the count   */
+        else if(cnt < 3){ cnt++; }                  /* same level for ~45 ms        */
+        if(cnt == 3 && raw != stable){              /* accept the debounced edge    */
+            stable = raw;
+            if(stable == 0){                        /* falling edge = press         */
+                g_msg_show ^= 1;
+                g_msg_show_dirty = 1;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(15));
+    }
+}
+
+/* ======================================================================= */
 void main(void)
 {
     uart_init();
     uart_puts("\r\n=== Knight Rider Clock  (FreeRTOS milestone-6, " BOARD_NAME ", AArch64) ===\r\n");
-    for(int k=0;k<8;k++){ gpio_set_function(SWEEP[k],GPIO_FUNC_OUTPUT); gpio_clear(1u<<SWEEP[k]); }
+    led_out_init();   /* LED sweep output: 74HC595 (default) or 8 GPIOs (LEDSWEEP=FULL) */
     tm1637_init(); max_init();
 
     g_spi_mutex = xSemaphoreCreateMutex();
@@ -618,6 +736,7 @@ void main(void)
     xTaskCreate(vHdmi,      "hdmi",  1024, NULL, 1, NULL);
     xTaskCreate(vServo,     "servo",  512, NULL, 1, NULL);
     xTaskCreate(vStepper,   "step",   512, NULL, 1, NULL);
+    xTaskCreate(vButton,    "btn",    512, NULL, 1, NULL);
 
     vTaskStartScheduler();
     for(;;){}

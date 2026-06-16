@@ -14,3 +14,11 @@ void *memmove(void *dst, const void *src, size_t n){
     return dst;
 }
 int abs(int v){ return v < 0 ? -v : v; }
+
+/* strlen/strchr/labs: also needed by drivers/qrcodegen.c on the -nostdlib
+ * build (alphanumeric/numeric segment helpers + version math). */
+size_t strlen(const char *s){ const char *p = s; while(*p) p++; return (size_t)(p - s); }
+char  *strchr(const char *s, int c){
+    for(;; s++){ if(*s == (char)c) return (char*)s; if(!*s) return (char*)0; }
+}
+long   labs(long v){ return v < 0 ? -v : v; }

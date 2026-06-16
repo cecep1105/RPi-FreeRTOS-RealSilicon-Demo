@@ -26,6 +26,14 @@ ADDSRC=../../Source/portable/MemMang/heap_4.c
 # Add compilation flags
 CFLAGS=-nostartfiles -DPERIPHERAL_BASE=0x20000000UL
 
+# LED-sweep output backend:
+#   make               -> 74HC595 shift register, 3 GPIOs (DATA=17, CLOCK=27, LATCH=22) [default]
+#   make LEDSWEEP=FULL  -> 8 direct GPIOs (original wiring).  Switch with: make clean first.
+LEDSWEEP ?= 595
+ifeq ($(LEDSWEEP),FULL)
+CFLAGS+=-DLEDSWEEP_FULL
+endif
+
 # Add linking flags
 LDFLAGS=-specs=nosys.specs
 
