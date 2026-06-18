@@ -13,6 +13,7 @@
 #include "font5x7.h"
 #include "fb.h"
 #include "qrcodegen.h"
+#include "la_render.h"   /* logic-analyzer view (BS05U -> HDMI) */
 #include "pwm.h"
 #include "stepper.h"
 #include "semphr.h"
@@ -73,6 +74,11 @@ static uint8_t  g_qr_buf[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAXVER)];
 static uint8_t  g_qr_tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAXVER)];
 static char     g_qr_text[160];   /* payload to encode (set by the parser)     */
 volatile int    g_qr_req = 0;     /* 0 idle, 1 = show pending, 2 = clear pending*/
+
+/* --- logic-analyzer view state (frames arrive over UART as "la ..." lines) -*/
+static   la_frame_t g_la;         /* reassembled frame (owned by HDMI task)    */
+volatile int    g_la_req = 0;     /* 0 idle, 1 = frame ready, 2 = leave view   */
+volatile int    g_la_on  = 0;     /* 1 = logic view currently owns the screen  */
 volatile int    g_qr_on  = 0;     /* 1 = QR currently on the HDMI screen        */
 
 /* ---- Panel button: enable/disable WebSocket/marquee messages on the displays
@@ -449,6 +455,21 @@ static void vHdmi(void *pv)
         }
         if(g_qr_on == 1){ vTaskDelay(pdMS_TO_TICKS(50)); continue; }  /* full QR holds, GUI hidden */
 
+        /* Logic-analyzer view: continuous frames; repaint only the lane bands  */
+        /* (chrome drawn once) so the ~4 fps live view doesn't flicker.         */
+        int la_rq = g_la_req;
+        if(la_rq){
+            g_la_req = 0;
+            if(la_rq == 1){                          /* a frame is ready             */
+                if(!g_la_on){ la_logic_chrome(&g_la); g_la_on = 1; }  /* enter on 1st */
+                la_logic_traces(&g_la);
+            } else if(la_rq == 2){                   /* leave logic view             */
+                g_la_on = 0; fb_clear(BLACK); fb_clock_reset();
+                prev[0] = 0; prev_sweep = -2; fb_marquee_set(g_msg);
+            }
+        }
+        if(g_la_on){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }  /* logic owns the screen */
+
         uint32_t s=g_secs; int hh=s/3600, mm=(s/60)%60, ss=s%60; char t[9];
         t[0]='0'+hh/10; t[1]='0'+hh%10; t[2]=':'; t[3]='0'+mm/10; t[4]='0'+mm%10; t[5]=':';
         t[6]='0'+ss/10; t[7]='0'+ss%10; t[8]=0;
@@ -587,6 +608,28 @@ static void qr_request(const char *p, int showreq)
     g_qr_req = showreq; uart_puts("ok qr\r\n");
 }
 
+/* Parse one "la ..." line into g_la. Data lines are silent (no ack) so the
+ * ~4 fps stream doesn't flood the link; only "la off" acks.
+ *   la begin <ncols> <nch> <rate>   la d <off> <hex>   la end   la off       */
+static void la_cmd(const char *p)
+{
+    if(seq(p,"off")){ g_la_req = 2; uart_puts("ok la off\r\n"); return; }
+    if(p[0]=='b'){                                   /* begin <ncols> <nch> <rate> */
+        const char *q = p+5; skip_sp(&q);            /* skip "begin"               */
+        int nc = parse_uint(&q); skip_sp(&q);
+        int ch = parse_uint(&q); skip_sp(&q);
+        uint32_t rate = (uint32_t)parse_uint(&q);
+        la_begin(&g_la, nc, ch, rate);               /* no ack */
+        return;
+    }
+    if(p[0]=='d' && p[1]==' '){                      /* d <off> <hex> */
+        const char *q = p+2; int off = parse_uint(&q); skip_sp(&q);
+        la_chunk(&g_la, off, q);                      /* no ack */
+        return;
+    }
+    if(p[0]=='e'){ g_la.ready = 1; g_la_req = 1; return; }   /* end (no ack) */
+}
+
 static void parse_line(char *line)
 {
     const char *p = line; skip_sp(&p);
@@ -610,6 +653,8 @@ static void parse_line(char *line)
         qr_request(p, 1);          /* full-screen QR (qr = alias for qrfull)        */
     } else if(seq(cw,"qrsmall")){
         qr_request(p, 3);          /* small QR in the band between bar and marquee  */
+    } else if(seq(cw,"la")){
+        la_cmd(p);                 /* logic-analyzer view (BS05U/sim -> HDMI)       */
     } else if(seq(cw,"run")){
         g_sweep_run=1; uart_puts("ok run\r\n");
     } else if(seq(cw,"stop")){

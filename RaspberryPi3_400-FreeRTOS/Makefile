@@ -52,6 +52,8 @@ OBJS +=build/queue.o
 OBJS +=build/timers.o
 
 OBJS +=build/heap_4.o
+OBJS += build/la_render.o
+
 
 .PHONY: all clean run runasm
 
