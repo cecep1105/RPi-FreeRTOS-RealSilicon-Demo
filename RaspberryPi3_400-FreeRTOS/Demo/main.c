@@ -14,6 +14,7 @@
 #include "fb.h"
 #include "qrcodegen.h"
 #include "la_render.h"   /* logic-analyzer view (BS05U -> HDMI) */
+#include "sc_render.h"   /* oscilloscope view (CHA/CHB -> HDMI) */
 #include "pwm.h"
 #include "stepper.h"
 #include "semphr.h"
@@ -79,6 +80,10 @@ volatile int    g_qr_req = 0;     /* 0 idle, 1 = show pending, 2 = clear pending
 static   la_frame_t g_la;         /* reassembled frame (owned by HDMI task)    */
 volatile int    g_la_req = 0;     /* 0 idle, 1 = frame ready, 2 = leave view   */
 volatile int    g_la_on  = 0;     /* 1 = logic view currently owns the screen  */
+/* --- oscilloscope view state (frames arrive over UART as "sc ..." lines) --*/
+static   sc_frame_t g_sc;         /* reassembled scope frame                   */
+volatile int    g_sc_req = 0;     /* 0 idle, 1 = frame ready, 2 = leave view   */
+volatile int    g_sc_on  = 0;     /* 1 = scope view currently owns the screen  */
 volatile int    g_qr_on  = 0;     /* 1 = QR currently on the HDMI screen        */
 
 /* ---- Panel button: enable/disable WebSocket/marquee messages on the displays
@@ -461,7 +466,7 @@ static void vHdmi(void *pv)
         if(la_rq){
             g_la_req = 0;
             if(la_rq == 1){                          /* a frame is ready             */
-                if(!g_la_on){ la_logic_chrome(&g_la); g_la_on = 1; }  /* enter on 1st */
+                if(!g_la_on){ g_sc_on = 0; la_logic_chrome(&g_la); g_la_on = 1; }  /* enter */
                 la_logic_traces(&g_la);
             } else if(la_rq == 2){                   /* leave logic view             */
                 g_la_on = 0; fb_clear(BLACK); fb_clock_reset();
@@ -469,6 +474,20 @@ static void vHdmi(void *pv)
             }
         }
         if(g_la_on){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }  /* logic owns the screen */
+
+        /* Oscilloscope view: same flicker-free, chrome-once model as logic.   */
+        int sc_rq = g_sc_req;
+        if(sc_rq){
+            g_sc_req = 0;
+            if(sc_rq == 1){
+                if(!g_sc_on){ g_la_on = 0; sc_scope_chrome(&g_sc); g_sc_on = 1; }  /* enter */
+                sc_scope_traces(&g_sc);
+            } else if(sc_rq == 2){                   /* leave scope view             */
+                g_sc_on = 0; fb_clear(BLACK); fb_clock_reset();
+                prev[0] = 0; prev_sweep = -2; fb_marquee_set(g_msg);
+            }
+        }
+        if(g_sc_on){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }  /* scope owns the screen */
 
         uint32_t s=g_secs; int hh=s/3600, mm=(s/60)%60, ss=s%60; char t[9];
         t[0]='0'+hh/10; t[1]='0'+hh%10; t[2]=':'; t[3]='0'+mm/10; t[4]='0'+mm%10; t[5]=':';
@@ -630,6 +649,30 @@ static void la_cmd(const char *p)
     if(p[0]=='e'){ g_la.ready = 1; g_la_req = 1; return; }   /* end (no ack) */
 }
 
+/* Parse one "sc ..." line into g_sc (scope). Like la_cmd, but the data line
+ * carries a channel index (0=A, 1=B) before the offset.
+ *   sc begin <ncols> <nch> <rate>   sc d <ch> <off> <hex>   sc end   sc off   */
+static void sc_cmd(const char *p)
+{
+    if(seq(p,"off")){ g_sc_req = 2; uart_puts("ok sc off\r\n"); return; }
+    if(p[0]=='b'){                                   /* begin <ncols> <nch> <rate> */
+        const char *q = p+5; skip_sp(&q);            /* skip "begin"               */
+        int nc = parse_uint(&q); skip_sp(&q);
+        int ch = parse_uint(&q); skip_sp(&q);
+        uint32_t rate = (uint32_t)parse_uint(&q);
+        sc_begin(&g_sc, nc, ch, rate);               /* no ack */
+        return;
+    }
+    if(p[0]=='d' && p[1]==' '){                      /* d <ch> <off> <hex> */
+        const char *q = p+2;
+        int chan = parse_uint(&q); skip_sp(&q);
+        int off  = parse_uint(&q); skip_sp(&q);
+        sc_chunk(&g_sc, chan, off, q);                /* no ack */
+        return;
+    }
+    if(p[0]=='e'){ g_sc.ready = 1; g_sc_req = 1; return; }   /* end (no ack) */
+}
+
 static void parse_line(char *line)
 {
     const char *p = line; skip_sp(&p);
@@ -655,6 +698,8 @@ static void parse_line(char *line)
         qr_request(p, 3);          /* small QR in the band between bar and marquee  */
     } else if(seq(cw,"la")){
         la_cmd(p);                 /* logic-analyzer view (BS05U/sim -> HDMI)       */
+    } else if(seq(cw,"sc")){
+        sc_cmd(p);                 /* oscilloscope view (CHA/CHB -> HDMI)           */
     } else if(seq(cw,"run")){
         g_sweep_run=1; uart_puts("ok run\r\n");
     } else if(seq(cw,"stop")){

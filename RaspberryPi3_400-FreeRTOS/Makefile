@@ -15,6 +15,7 @@ LEDSWEEP ?= 595
 ifeq ($(LEDSWEEP),FULL)
   CFLAGS += -DLEDSWEEP_FULL
 endif
+
 ASMFLAGS = -mcpu=cortex-a53
 
 BUILDPATH = build
@@ -53,7 +54,7 @@ OBJS +=build/timers.o
 
 OBJS +=build/heap_4.o
 OBJS += build/la_render.o
-
+OBJS += build/sc_render.o
 
 .PHONY: all clean run runasm
 

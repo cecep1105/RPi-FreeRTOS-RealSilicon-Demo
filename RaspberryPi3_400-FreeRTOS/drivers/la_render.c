@@ -111,7 +111,9 @@ void la_logic_chrome(const la_frame_t *f){
     for(int ln=0; ln<lanes; ln++){
         int y_lo,y_hi; la_lane_levels(TOP,laneh,amp,ln,&y_lo,&y_hi);
         fb_fill(plotx,TOP+ln*laneh+laneh-1,plotw,1,LA_GRID);   /* separator */
+        /* L5 is hardware-shared with the BS05 internal clock generator */
         char lab[4]={'L',(char)('0'+ln),0,0};
+        if(ln==5){ lab[0]='C'; lab[1]='L'; lab[2]='K'; }
         fb_text(14,(y_lo+y_hi)/2-7,lab,2,LANE_COL[ln]);
     }
     fb_text(16,H-18,"la off = back to clock",1,RGB(90,98,112));
