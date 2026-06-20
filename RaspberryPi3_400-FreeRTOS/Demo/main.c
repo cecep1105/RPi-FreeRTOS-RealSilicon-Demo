@@ -49,7 +49,7 @@ volatile int g_step_run    = 0;   /* 1 = stepper turning                        
 volatile int g_step_dir    = 1;   /* 1 = CW, 0 = CCW                            */
 volatile int g_step_sps    = 200; /* steps per second (1..1000)                 */
 static SemaphoreHandle_t g_spi_mutex;
-volatile int g_machine   = 0;     /* 1 = suppress echo/prompt (ESP32 link) */
+volatile int g_machine   = 1;     /* 1 = suppress echo/prompt (ESP32 link) */
 static char  g_marquee[40] = "KNIGHT RIDER CLOCK"; /* text currently on the marquee */
 volatile int g_sweep_run = 1;
 volatile int g_sweep_ms  = 80;
