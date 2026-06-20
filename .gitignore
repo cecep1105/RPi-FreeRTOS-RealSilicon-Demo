@@ -54,3 +54,5 @@ dkms.conf
 # debug information files
 *.dwo
 RaspberryPi1-FreeRTOS/FreeRTOS/Demo/ARM6_BCM2835/out/ARM6_BCM2835Demo.objdump
+RaspberryPi3_400-FreeRTOS/kernel8.img
+RaspberryPi3_400-FreeRTOS/kernel8.list
