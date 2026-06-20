@@ -460,34 +460,33 @@ static void vHdmi(void *pv)
         }
         if(g_qr_on == 1){ vTaskDelay(pdMS_TO_TICKS(50)); continue; }  /* full QR holds, GUI hidden */
 
-        /* Logic-analyzer view: continuous frames; repaint only the lane bands  */
-        /* (chrome drawn once) so the ~4 fps live view doesn't flicker.         */
-        int la_rq = g_la_req;
-        if(la_rq){
-            g_la_req = 0;
-            if(la_rq == 1){                          /* a frame is ready             */
-                if(!g_la_on){ g_sc_on = 0; la_logic_chrome(&g_la); g_la_on = 1; }  /* enter */
-                la_logic_traces(&g_la);
-            } else if(la_rq == 2){                   /* leave logic view             */
-                g_la_on = 0; fb_clear(BLACK); fb_clock_reset();
-                prev[0] = 0; prev_sweep = -2; fb_marquee_set(g_msg);
-            }
-        }
-        if(g_la_on){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }  /* logic owns the screen */
+        /* Logic-analyzer & oscilloscope views. BOTH request flags are handled
+         * every pass with NO early continue between them, so a frame for either
+         * view takes over from the other purely on arrival (the ESP streams only
+         * one of them at a time). Entering one view clears the other; a single
+         * combined guard at the end lets the active view own the screen.        */
+        int la_rq = g_la_req; g_la_req = 0;
+        int sc_rq = g_sc_req; g_sc_req = 0;
 
-        /* Oscilloscope view: same flicker-free, chrome-once model as logic.   */
-        int sc_rq = g_sc_req;
-        if(sc_rq){
-            g_sc_req = 0;
-            if(sc_rq == 1){
-                if(!g_sc_on){ g_la_on = 0; sc_scope_chrome(&g_sc); g_sc_on = 1; }  /* enter */
-                sc_scope_traces(&g_sc);
-            } else if(sc_rq == 2){                   /* leave scope view             */
-                g_sc_on = 0; fb_clear(BLACK); fb_clock_reset();
-                prev[0] = 0; prev_sweep = -2; fb_marquee_set(g_msg);
-            }
+        if(la_rq == 2){                              /* leave logic (only if on)     */
+            if(g_la_on){ fb_clear(BLACK); fb_clock_reset();
+                         prev[0] = 0; prev_sweep = -2; fb_marquee_set(g_msg); }
+            g_la_on = 0;
         }
-        if(g_sc_on){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }  /* scope owns the screen */
+        if(sc_rq == 2){                              /* leave scope (only if on)     */
+            if(g_sc_on){ fb_clear(BLACK); fb_clock_reset();
+                         prev[0] = 0; prev_sweep = -2; fb_marquee_set(g_msg); }
+            g_sc_on = 0;
+        }
+        if(la_rq == 1){                              /* logic frame ready            */
+            if(!g_la_on){ g_sc_on = 0; la_logic_chrome(&g_la); g_la_on = 1; }  /* enter */
+            la_logic_traces(&g_la);
+        }
+        if(sc_rq == 1){                              /* scope frame ready            */
+            if(!g_sc_on){ g_la_on = 0; sc_scope_chrome(&g_sc); g_sc_on = 1; }  /* enter */
+            sc_scope_traces(&g_sc);
+        }
+        if(g_la_on || g_sc_on){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }  /* a view owns the screen */
 
         uint32_t s=g_secs; int hh=s/3600, mm=(s/60)%60, ss=s%60; char t[9];
         t[0]='0'+hh/10; t[1]='0'+hh%10; t[2]=':'; t[3]='0'+mm/10; t[4]='0'+mm%10; t[5]=':';
