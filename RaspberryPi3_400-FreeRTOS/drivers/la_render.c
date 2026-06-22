@@ -52,6 +52,8 @@ static const uint32_t LANE_COL[8] = {
 #define LA_BG   RGB(8,10,14)
 #define LA_GRID RGB(28,32,40)
 #define LA_INK  RGB(230,235,245)
+#define LA_DIVX 10   /* notional time divisions across the plot (for time/div) */
+#define LA_OVS  2    /* ESP packs BS_NSAMPLES(480) into BS_NCOLS(240): 2 samp/col */
 
 /* shared lane geometry so chrome and traces agree exactly */
 static void la_geom(const la_frame_t *f,int *TOP,int *plotx,int *plotw,
@@ -81,6 +83,24 @@ static int cap_u(char *cap, int c, unsigned v){
     return c;
 }
 
+/* append "<v.v><unit>/div" for a window of `winsamp` samples at `rate_hz`,
+ * split into `ndiv` divisions. integer math in picoseconds, one decimal. */
+static int cap_timediv(char *cap,int c,uint32_t rate_hz,int winsamp,int ndiv){
+    if(rate_hz==0 || winsamp<=0 || ndiv<=0){ cap[c++]='-'; return c; }
+    unsigned long long ps = (unsigned long long)winsamp * 1000000000000ULL
+                            / ((unsigned long long)rate_hz * (unsigned)ndiv);
+    const char *u; unsigned long long sc;
+    if(ps>=1000000000ULL){ u="ms"; sc=1000000000ULL; }
+    else if(ps>=1000000ULL){ u="us"; sc=1000000ULL; }
+    else { u="ns"; sc=1000ULL; }
+    unsigned long long v10=(ps*10ULL + sc/2)/sc;       /* value x10, rounded */
+    c=cap_u(cap,c,(unsigned)(v10/10));
+    cap[c++]='.'; cap[c++]=(char)('0'+(unsigned)(v10%10));
+    cap[c++]=u[0]; cap[c++]=u[1];
+    cap[c++]='/'; cap[c++]='d'; cap[c++]='i'; cap[c++]='v';
+    return c;
+}
+
 /* Draw the static parts ONCE when entering logic mode (header, caption,
  * channel labels, lane separators, footer). */
 void la_logic_chrome(const la_frame_t *f){
@@ -105,6 +125,8 @@ void la_logic_chrome(const la_frame_t *f){
         cap[c++]='k';
     }
     cap[c++]='H'; cap[c++]='z';
+    cap[c++]=' '; cap[c++]=' ';
+    c = cap_timediv(cap, c, f->rate_hz, (int)f->ncols * LA_OVS, LA_DIVX);
     cap[c]=0;
     fb_text(16,44,cap,2,RGB(150,160,180));
 
@@ -117,6 +139,17 @@ void la_logic_chrome(const la_frame_t *f){
         fb_text(14,(y_lo+y_hi)/2-7,lab,2,LANE_COL[ln]);
     }
     fb_text(16,H-18,"la off = back to clock",1,RGB(90,98,112));
+
+    /* faint vertical time divisions across the full lane stack (LA_DIVX cells).
+     * The per-frame trace repaint restores these inside each band; the chrome
+     * pass covers the separator gaps so the lines look continuous. */
+    {
+        int gtop = TOP, gbot = TOP + lanes*laneh;
+        for(int i=1;i<LA_DIVX;i++){
+            int gx = plotx + (plotw*i)/LA_DIVX;
+            fb_fill(gx, gtop, 1, gbot-gtop, LA_GRID);
+        }
+    }
 }
 
 /* Repaint ONLY the trace bands (call once per frame in continuous mode).
@@ -143,6 +176,15 @@ void la_logic_traces(const la_frame_t *f){
             fb_fill(px, band_top, cpw, ink_top-band_top, LA_BG);      /* bg above */
             fb_fill(px, ink_top,  cpw, ink_bot-ink_top,  LANE_COL[ln]);/* trace   */
             fb_fill(px, ink_bot,  cpw, band_bot-ink_bot, LA_BG);      /* bg below */
+            /* restore the vertical time-division line under/around the trace so
+             * the per-frame repaint doesn't erase it (trace ink stays on top) */
+            for(int gi=1; gi<LA_DIVX; gi++){
+                int gx=plotx+(plotw*gi)/LA_DIVX;
+                if(gx>=px && gx<px+cpw){
+                    if(ink_top>band_top) fb_fill(gx, band_top, 1, ink_top-band_top, LA_GRID);
+                    if(band_bot>ink_bot) fb_fill(gx, ink_bot,  1, band_bot-ink_bot, LA_GRID);
+                }
+            }
             prev_bit=bit; prev_y=y;
         }
     }

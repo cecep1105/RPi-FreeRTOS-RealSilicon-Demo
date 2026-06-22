@@ -67,6 +67,24 @@ static int cap_u(char *cap,int c,unsigned v){
     return c;
 }
 
+/* append "<v.v><unit>/div" for a window of `winsamp` samples at `rate_hz`,
+ * split into `ndiv` divisions. integer math in picoseconds, one decimal. */
+static int cap_timediv(char *cap,int c,uint32_t rate_hz,int winsamp,int ndiv){
+    if(rate_hz==0 || winsamp<=0 || ndiv<=0){ cap[c++]='-'; return c; }
+    unsigned long long ps = (unsigned long long)winsamp * 1000000000000ULL
+                            / ((unsigned long long)rate_hz * (unsigned)ndiv);
+    const char *u; unsigned long long sc;
+    if(ps>=1000000000ULL){ u="ms"; sc=1000000000ULL; }
+    else if(ps>=1000000ULL){ u="us"; sc=1000000ULL; }
+    else { u="ns"; sc=1000ULL; }
+    unsigned long long v10=(ps*10ULL + sc/2)/sc;       /* value x10, rounded */
+    c=cap_u(cap,c,(unsigned)(v10/10));
+    cap[c++]='.'; cap[c++]=(char)('0'+(unsigned)(v10%10));
+    cap[c++]=u[0]; cap[c++]=u[1];
+    cap[c++]='/'; cap[c++]='d'; cap[c++]='i'; cap[c++]='v';
+    return c;
+}
+
 /* ---- chrome (draw once) ---------------------------------------------- */
 void sc_scope_chrome(const sc_frame_t *f){
     int plotx,ploty,plotw,ploth,cpw; sc_geom(&plotx,&ploty,&plotw,&ploth,&cpw,f);
@@ -74,14 +92,17 @@ void sc_scope_chrome(const sc_frame_t *f){
     fb_clear(SC_BG);
     fb_text(16,14,"OSCILLOSCOPE  BS05U",2,SC_INK);
 
-    char cap[40]; int c=0;
+    char cap[56]; int c=0;
     const char *s="CH"; cap[c++]=s[0]; cap[c++]=s[1];
     cap[c++]='A'; if(f->nch>1){ cap[c++]='+'; cap[c++]='B'; }
     cap[c++]=' '; cap[c++]=' ';
     c=cap_u(cap,c,f->ncols); cap[c++]='S'; cap[c++]=' '; cap[c++]=' ';
     if(f->rate_hz>=1000000){ c=cap_u(cap,c,f->rate_hz/1000000); cap[c++]='M'; }
     else                   { c=cap_u(cap,c,f->rate_hz/1000);    cap[c++]='K'; }
-    cap[c++]='S'; cap[c++]='/'; cap[c++]='s'; cap[c]=0;
+    cap[c++]='S'; cap[c++]='/'; cap[c++]='s';
+    cap[c++]=' '; cap[c++]=' ';
+    c=cap_timediv(cap,c,f->rate_hz,(int)f->ncols,SC_DIVX);   /* scope: 1 samp/col */
+    cap[c]=0;
     fb_text(16,44,cap,2,RGB(150,160,180));
 
     /* legend */

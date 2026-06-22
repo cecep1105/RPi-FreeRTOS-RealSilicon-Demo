@@ -189,7 +189,11 @@ static void vClockOwner(void *pv)
             case CMD_NETMSG: {         /* WebSocket message: original case, gated by button */
                 if(!g_msg_show) break;                          // gated off -> drop, keep base
                 int i = 0;
-                for(; cmd.text[i] && i < (int)sizeof(g_msg)-1; i++) g_msg[i] = cmd.text[i];
+                if(cmd.text[0]){                                // netwatch text -> show it
+                    for(; cmd.text[i] && i < (int)sizeof(g_msg)-1; i++) g_msg[i] = cmd.text[i];
+                } else {                                        // empty -> revert to usual base
+                    for(; g_base_msg[i] && i < (int)sizeof(g_msg)-1; i++) g_msg[i] = g_base_msg[i];
+                }
                 g_msg[i] = 0;
                 tlen = build_ticker(ticker, g_secs, g_msg);
                 twpx = tlen * (FONT_W + 1);
