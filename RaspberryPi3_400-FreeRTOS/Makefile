@@ -56,6 +56,14 @@ OBJS +=build/heap_4.o
 OBJS += build/la_render.o
 OBJS += build/sc_render.o
 
+OBJS +=build/genet.o
+OBJS +=build/serror.o
+
+OBJS +=build/mongoose.o
+OBJS +=build/mongoose_glue.o
+CFLAGS += -I Demo
+
+
 .PHONY: all clean run runasm
 
 all : kernel8.img
@@ -88,6 +96,10 @@ build/%.o : FreeRTOS/Source/portable/GCC/ARM_CA53_64_RaspberryPi3/%.S
 
 build/%.o : FreeRTOS/Source/portable/MemMang/%.c
 	$(CROSS)-gcc $(CFLAGS)  -c -o $@ $<
+
+build/mongoose.o : Demo/mongoose.c
+	$(CROSS)-gcc -mcpu=cortex-a53 -mstrict-align -fno-pic -ffreestanding -std=gnu99 -O2 -w -I$(INCLUDEPATH1) -I$(INCLUDEPATH2) -I$(INCLUDEPATH3) -Idrivers -IDemo -DPERIPHERAL_BASE=$(PBASE) -c -o build/mongoose.o Demo/mongoose.c
+
 
 $(BUILDPATH):
 	@if [ ! -d $(BUILDPATH) ]; then \

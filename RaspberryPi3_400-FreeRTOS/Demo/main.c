@@ -18,7 +18,7 @@
 #include "pwm.h"
 #include "stepper.h"
 #include "semphr.h"
-
+#include "genet.h"
 
 #if (PERIPHERAL_BASE == 0xFE000000UL)
 #define BOARD_NAME "Pi 400 / Pi 4 (BCM2711)"
@@ -813,8 +813,29 @@ static void vButton(void *pv)
 /* ======================================================================= */
 void main(void)
 {
-    uart_init();
+    uart_init();   
     uart_puts("\r\n=== Knight Rider Clock  (FreeRTOS milestone-6, " BOARD_NAME ", AArch64) ===\r\n");
+    genet_probe();
+    // uart_puts("MAIN: A - past genet_probe\r\n");
+    // delay_us(20000);
+    // __asm__ volatile("msr daifclr, #4; isb");   /* unmask SError (DAIF.A) now */
+    // uart_puts("MAIN: B - survived SError unmask\r\n");
+    // delay_us(20000);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     led_out_init();   /* LED sweep output: 74HC595 (default) or 8 GPIOs (LEDSWEEP=FULL) */
     tm1637_init(); max_init();
 
@@ -830,6 +851,10 @@ void main(void)
     xTaskCreate(vServo,     "servo",  512, NULL, 1, NULL);
     xTaskCreate(vStepper,   "step",   512, NULL, 1, NULL);
     xTaskCreate(vButton,    "btn",    512, NULL, 1, NULL);
+
+    // uart_puts("MAIN: C - starting scheduler\r\n");
+    void net_start(void);
+    net_start();
 
     vTaskStartScheduler();
     for(;;){}
