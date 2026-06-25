@@ -13,6 +13,9 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+/* the command parser from main.c (UART console path); now non-static */
+extern void parse_line(char *line);
+
 /* ----- libc shims (weak: used only if nothing else provides them) ----- */
 #define WEAK __attribute__((weak))
 
@@ -150,50 +153,66 @@ static void put_ip(uint32_t ip) {       /* network-order octets, byte 0..3 */
     put_u8(o[2]); uart_putc('.'); put_u8(o[3]);
 }
 
-static void put_hex64(uint64_t v) {
-    uart_puts("0x");
-    for (int i = 15; i >= 0; i--) {
-        uint32_t n = (uint32_t)((v >> (i * 4)) & 0xF);
-        uart_putc(n < 10 ? (char)('0' + n) : (char)('A' + n - 10));
+/* HTTP -> parse_line() bridge. A request to /cmd carries a command either as
+ * the query var ?c=...  (GET, easy from a browser) or as the request body
+ * (POST, easy from curl). The command text is exactly what you'd type on the
+ * UART console; parse_line() enqueues it on g_cmdq just like the UART task. */
+static void ev_handler(struct mg_connection *c, int ev, void *ev_data) {
+    if (ev != MG_EV_HTTP_MSG) return;
+    struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+
+    if (mg_match(hm->uri, mg_str("/cmd"), NULL)) {
+        char cmd[160];
+        int n = mg_http_get_var(&hm->query, "c", cmd, sizeof(cmd));   /* ?c=... */
+        if (n <= 0 && hm->body.len > 0) {                             /* or POST body */
+            size_t len = hm->body.len < sizeof(cmd) - 1 ? hm->body.len : sizeof(cmd) - 1;
+            for (size_t i = 0; i < len; i++) cmd[i] = hm->body.buf[i];
+            cmd[len] = 0; n = (int) len;
+        }
+        if (n > 0) {
+            while (n > 0 && (cmd[n-1] == '\r' || cmd[n-1] == '\n' || cmd[n-1] == ' '))
+                cmd[--n] = 0;                                         /* trim trailing ws */
+            parse_line(cmd);
+            mg_http_reply(c, 200, "Content-Type: text/plain\r\n", "OK: %s\n", cmd);
+        } else {
+            mg_http_reply(c, 400, "Content-Type: text/plain\r\n", "no command\n");
+        }
+    } else {
+        mg_http_reply(c, 200, "Content-Type: text/html\r\n",
+            "<!doctype html><title>Pi400</title>"
+            "<h2>Pi400 bare-metal command bridge</h2>"
+            "<form action=/cmd><input name=c size=40 autofocus> <button>send</button></form>"
+            "<p>POST works too: <code>curl -d 'msg HELLO' http://&lt;ip&gt;/cmd</code></p>");
     }
 }
 
 static void net_task(void *arg) {
     (void)arg;
-    /* Belt-and-suspenders: ensure FP/SIMD is enabled in this context before
-     * any Mongoose code (compiled with FP) runs. CPACR_EL1 is per-EL, so this
-     * is global + idempotent. */
+    /* enable FP/SIMD in this context: Mongoose is compiled with FP, the rest
+     * of the kernel is integer-only, and only this task ever touches FP. */
     uint64_t cpacr;
     __asm__ volatile("mrs %0, cpacr_el1" : "=r"(cpacr));
     cpacr |= (3ULL << 20);
     __asm__ volatile("msr cpacr_el1, %0; isb" :: "r"(cpacr));
-    __asm__ volatile("mrs %0, cpacr_el1" : "=r"(cpacr));
 
-    uart_puts("NET: [A] task started, CPACR=");
-    put_hex64(cpacr);
-    uart_puts("\r\n");
-
-    uart_puts("NET: [B] pre mg_mgr_init\r\n");
     mg_mgr_init(&s_mgr);
-    uart_puts("NET: [C] build mif\r\n");
     memset(&s_mif, 0, sizeof(s_mif));
     genet_get_mac(s_mif.mac);
     s_mif.driver = &s_genet_driver;
     s_mif.driver_data = NULL;
-    s_mif.ip = 0;                /* 0 => DHCP */
-
-    uart_puts("NET: [D] mg_tcpip_init\r\n");
+    s_mif.ip = 0;                          /* 0 => DHCP */
     mg_tcpip_init(&s_mgr, &s_mif);
-    uart_puts("NET: [E] entering poll loop\r\n");
+    mg_http_listen(&s_mgr, "http://0.0.0.0:80", ev_handler, NULL);
+    uart_puts("NET: stack up, HTTP on :80, waiting for DHCP...\r\n");
 
-    int once = 0;
     uint32_t last = 0xFFFFFFFFu;
     for (;;) {
         mg_mgr_poll(&s_mgr, 1);
-        if (!once) { uart_puts("NET: [F] first poll ok\r\n"); once = 1; }
         if (s_mif.ip != last) {
             last = s_mif.ip;
-            uart_puts("NET: IP = "); put_ip(s_mif.ip); uart_puts("\r\n");
+            if (s_mif.ip) {
+                uart_puts("NET: ready  http://"); put_ip(s_mif.ip); uart_puts("/\r\n");
+            }
         }
         vTaskDelay(1);
     }

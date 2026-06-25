@@ -676,7 +676,7 @@ static void sc_cmd(const char *p)
     if(p[0]=='e'){ g_sc.ready = 1; g_sc_req = 1; return; }   /* end (no ack) */
 }
 
-static void parse_line(char *line)
+void parse_line(char *line)
 {
     const char *p = line; skip_sp(&p);
     char cw[16]; if(!word(&p,cw,sizeof cw)) return; skip_sp(&p);
