@@ -112,9 +112,6 @@ bool mg_random(void *buf, size_t len) {
     return true;
 }
 
-/* ----- route Mongoose log output to UART ----- */
-static void log_putchar(char c, void *param) { (void)param; uart_putc(c); }
-
 /* ====================== mg_tcpip driver glue ========================= */
 static bool drv_init(struct mg_tcpip_if *ifp) {
     (void)ifp;
@@ -139,27 +136,65 @@ static struct mg_tcpip_driver s_genet_driver = {
 };
 
 /* ====================== the network task ============================ */
+static struct mg_mgr      s_mgr;   /* kept off the task stack */
+static struct mg_tcpip_if s_mif;
+
+static void put_u8(uint8_t v) {
+    char b[4]; int i = 3; b[3] = 0;
+    do { b[--i] = (char)('0' + v % 10); v /= 10; } while (v && i);
+    uart_puts(&b[i]);
+}
+static void put_ip(uint32_t ip) {       /* network-order octets, byte 0..3 */
+    const uint8_t *o = (const uint8_t *) &ip;
+    put_u8(o[0]); uart_putc('.'); put_u8(o[1]); uart_putc('.');
+    put_u8(o[2]); uart_putc('.'); put_u8(o[3]);
+}
+
+static void put_hex64(uint64_t v) {
+    uart_puts("0x");
+    for (int i = 15; i >= 0; i--) {
+        uint32_t n = (uint32_t)((v >> (i * 4)) & 0xF);
+        uart_putc(n < 10 ? (char)('0' + n) : (char)('A' + n - 10));
+    }
+}
+
 static void net_task(void *arg) {
     (void)arg;
-    struct mg_mgr mgr;
+    /* Belt-and-suspenders: ensure FP/SIMD is enabled in this context before
+     * any Mongoose code (compiled with FP) runs. CPACR_EL1 is per-EL, so this
+     * is global + idempotent. */
+    uint64_t cpacr;
+    __asm__ volatile("mrs %0, cpacr_el1" : "=r"(cpacr));
+    cpacr |= (3ULL << 20);
+    __asm__ volatile("msr cpacr_el1, %0; isb" :: "r"(cpacr));
+    __asm__ volatile("mrs %0, cpacr_el1" : "=r"(cpacr));
 
-    mg_log_set_fn(log_putchar, NULL);
-    mg_log_set(MG_LL_INFO);
-    mg_mgr_init(&mgr);
+    uart_puts("NET: [A] task started, CPACR=");
+    put_hex64(cpacr);
+    uart_puts("\r\n");
 
-    static struct mg_tcpip_if mif;
-    memset(&mif, 0, sizeof(mif));
-    genet_get_mac(mif.mac);
-    mif.driver = &s_genet_driver;
-    mif.driver_data = NULL;
-    mif.ip = 0;                /* 0 => DHCP */
+    uart_puts("NET: [B] pre mg_mgr_init\r\n");
+    mg_mgr_init(&s_mgr);
+    uart_puts("NET: [C] build mif\r\n");
+    memset(&s_mif, 0, sizeof(s_mif));
+    genet_get_mac(s_mif.mac);
+    s_mif.driver = &s_genet_driver;
+    s_mif.driver_data = NULL;
+    s_mif.ip = 0;                /* 0 => DHCP */
 
-    mg_tcpip_init(&mgr, &mif);
-    MG_INFO(("net_task up, MAC %02x:%02x:%02x:%02x:%02x:%02x, waiting for DHCP...",
-             mif.mac[0], mif.mac[1], mif.mac[2], mif.mac[3], mif.mac[4], mif.mac[5]));
+    uart_puts("NET: [D] mg_tcpip_init\r\n");
+    mg_tcpip_init(&s_mgr, &s_mif);
+    uart_puts("NET: [E] entering poll loop\r\n");
 
+    int once = 0;
+    uint32_t last = 0xFFFFFFFFu;
     for (;;) {
-        mg_mgr_poll(&mgr, 1);
+        mg_mgr_poll(&s_mgr, 1);
+        if (!once) { uart_puts("NET: [F] first poll ok\r\n"); once = 1; }
+        if (s_mif.ip != last) {
+            last = s_mif.ip;
+            uart_puts("NET: IP = "); put_ip(s_mif.ip); uart_puts("\r\n");
+        }
         vTaskDelay(1);
     }
 }

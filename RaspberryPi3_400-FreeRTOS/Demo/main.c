@@ -765,7 +765,7 @@ static void vUartCmd(void *pv)
     (void)pv;
     char line[128]; int li=0;
     while(uart_getc_nb()>=0){}
-    uart_puts("\r\n"); print_help(); uart_puts(PROMPT);
+    // uart_puts("\r\n"); print_help(); uart_puts(PROMPT);
     for(;;){
         int ch, active=0;
         while((ch = uart_getc_nb()) >= 0){          // drain ALL available right now
