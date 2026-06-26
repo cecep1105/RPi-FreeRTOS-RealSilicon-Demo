@@ -51,6 +51,9 @@ extern char g_marquee[];   /* live HDMI marquee text (main.c) */
 #ifndef NTP_URL
 #define NTP_URL "udp://time.google.com:123"
 #endif
+#ifndef DNS_URL
+#define DNS_URL ""        /* empty => resolve via the DHCP gateway (your router) */
+#endif
 #ifndef TZ_OFFSET_MIN
 #define TZ_OFFSET_MIN 420
 #endif
@@ -263,11 +266,9 @@ static const char DASH[] =
   ".marquee{max-width:1100px;margin:14px auto 0;background:#0c0704;border:1px solid #2c1e08;\n"
   "  border-radius:10px;overflow:hidden;display:flex;align-items:center;\n"
   "  box-shadow:inset 0 0 34px rgba(0,0,0,.6)}\n"
-  ".mqtrack{display:inline-flex;white-space:nowrap;will-change:transform;\n"
-  "  animation:mqscroll linear infinite}\n"
-  ".mqtrack span{padding:0 2.2vw;font-weight:700;color:#ffce6b;letter-spacing:.02em;\n"
+  ".mqtrack{display:inline-block;white-space:nowrap;will-change:transform;\n"
+  "  font-weight:700;color:#ffce6b;letter-spacing:.02em;\n"
   "  font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}\n"
-  "@keyframes mqscroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}\n"
   "@media (prefers-reduced-motion:reduce){.scan i{animation:none;margin-left:33%}}\n"
   "</style></head><body>\n"
   "<header>\n"
@@ -292,9 +293,9 @@ static const char DASH[] =
   "\n"
   "  <section class=card>\n"
   "    <h2>MARQUEE</h2>\n"
-  "    <div class=row><input id=m placeholder='msg (shown uppercase)'>\n"
+  "    <div class=row><input id=m maxlength=200 placeholder='msg (shown uppercase)'>\n"
   "      <button class=go onclick=\"sendv('m','msg')\">send</button></div>\n"
-  "    <div class=row><input id=nm placeholder='netmsg (original case)'>\n"
+  "    <div class=row><input id=nm maxlength=200 placeholder='netmsg (original case)'>\n"
   "      <button class=go onclick=\"sendv('nm','netmsg')\">send</button></div>\n"
   "  </section>\n"
   "\n"
@@ -424,28 +425,30 @@ static const char DASH[] =
   "/* ---- scrolling ticker, mirroring the HDMI marquee (g_marquee) ---- */\n"
   "(function(){\n"
   "  const wrap=document.querySelector('.marquee'), track=document.getElementById('mqtrack');\n"
-  "  let cur='';\n"
-  "  function dur(){\n"
-  "    const w=track.scrollWidth/2;                       // width of one copy\n"
-  "    track.style.animationDuration=Math.max(6,(w/90)).toFixed(1)+'s';  // ~90 px/s\n"
-  "  }\n"
+  "  let cur='', x=0, W=0, tW=0;\n"
+  "  const SPEED=1.4;                                   // px/frame (~84 px/s)\n"
+  "  function measure(){ W=wrap.clientWidth; tW=track.scrollWidth; }\n"
   "  function size(){\n"
   "    const card=document.querySelector('.card'), ch=card?card.offsetHeight:170;\n"
-  "    const bar=Math.round(ch/3);                         // 1/3 of a card\n"
+  "    const bar=Math.round(ch/3);                      // 1/3 of a card\n"
   "    wrap.style.height=bar+'px';\n"
-  "    track.querySelectorAll('span').forEach(s=>s.style.fontSize=Math.round(bar*0.6)+'px');\n"
-  "    dur();\n"
+  "    track.style.fontSize=Math.round(bar*0.6)+'px';\n"
+  "    measure();\n"
+  "    if(x>W || x< -tW) x=W;\n"
   "  }\n"
-  "  function set(t){\n"
-  "    cur=t; track.innerHTML='';\n"
-  "    for(let k=0;k<2;k++){const s=document.createElement('span');s.textContent=t;track.appendChild(s);}\n"
-  "    size();\n"
+  "  function set(t){ cur=t; track.textContent=t; measure(); x=W; }   // start at right edge\n"
+  "  function frame(){\n"
+  "    x-=SPEED;\n"
+  "    if(x < -tW) x=W;                                 // fully off-screen -> repeat from right\n"
+  "    track.style.transform='translateX('+x+'px)';\n"
+  "    requestAnimationFrame(frame);\n"
   "  }\n"
   "  async function poll(){\n"
   "    try{const r=await fetch('/marquee');if(r.ok){const t=(await r.text()).trim();\n"
   "      if(t&&t!==cur)set(t);}}catch(e){}\n"
   "  }\n"
-  "  set('KNIGHT RIDER CLOCK'); poll(); setInterval(poll,1500); addEventListener('resize',size);\n"
+  "  set('KNIGHT RIDER CLOCK'); requestAnimationFrame(frame);\n"
+  "  poll(); setInterval(poll,1500); addEventListener('resize',size);\n"
   "})();\n"
   "</script>\n"
   "</body></html>\n"
@@ -479,7 +482,7 @@ static void ev_handler(struct mg_connection *c, int ev, void *ev_data) {
     }
 
     if (mg_match(hm->uri, mg_str("/cmd"), NULL)) {
-        char cmd[160];
+        char cmd[256];
         int n = mg_http_get_var(&hm->query, "c", cmd, sizeof(cmd));   /* ?c=... */
         if (n <= 0 && hm->body.len > 0) {                             /* or POST body */
             size_t len = hm->body.len < sizeof(cmd) - 1 ? hm->body.len : sizeof(cmd) - 1;
@@ -501,6 +504,37 @@ static void ev_handler(struct mg_connection *c, int ev, void *ev_data) {
 
 #if ENABLE_NTP
 static struct mg_connection *s_sntp;
+static int  s_ntp_synced;
+static char s_dnsurl[28];   /* "udp://A.B.C.D:53"  from DHCP (or fallback)    */
+static char s_ntpurl[28];   /* "udp://A.B.C.D:123" from DHCP SNTP, if offered  */
+static char s_gwurl[28];    /* "udp://<gateway>:123" fallback NTP target       */
+
+/* Build "udp://A.B.C.D:port" from a network-order IPv4 address. */
+static void ip4_url(char *dst, uint32_t ip_net, int port) {
+    const uint8_t *o = (const uint8_t *) &ip_net;
+    int n = 0; const char *p = "udp://";
+    while (*p) dst[n++] = *p++;
+    for (int i = 0; i < 4; i++) {
+        uint8_t v = o[i];
+        if (v >= 100) dst[n++] = (char)('0' + v / 100);
+        if (v >= 10)  dst[n++] = (char)('0' + (v / 10) % 10);
+        dst[n++] = (char)('0' + v % 10);
+        dst[n++] = (i < 3) ? '.' : ':';
+    }
+    if (port >= 100) dst[n++] = (char)('0' + port / 100);
+    if (port >= 10)  dst[n++] = (char)('0' + (port / 10) % 10);
+    dst[n++] = (char)('0' + port % 10);
+    dst[n] = 0;
+}
+
+static void setup_dns(void) {
+    if (s_dnsurl[0]) return;                        /* already set from DHCP   */
+    if (DNS_URL[0]) { s_mgr.dns4.url = DNS_URL; uart_puts("NTP: DNS " DNS_URL "\r\n"); return; }
+    ip4_url(s_dnsurl, s_mif.gw, 53);                /* last resort: gateway    */
+    s_mgr.dns4.url = s_dnsurl;
+    uart_puts("NTP: DNS (gw) "); uart_puts(s_dnsurl); uart_puts("\r\n");
+}
+
 static void sntp_fn(struct mg_connection *c, int ev, void *ev_data) {
     (void) c;
     if (ev == MG_EV_SNTP_TIME) {
@@ -513,34 +547,100 @@ static void sntp_fn(struct mg_connection *c, int ev, void *ev_data) {
         line[n++]=(char)('0'+hh/10); line[n++]=(char)('0'+hh%10); line[n++]=':';
         line[n++]=(char)('0'+mm/10); line[n++]=(char)('0'+mm%10); line[n++]=':';
         line[n++]=(char)('0'+ss/10); line[n++]=(char)('0'+ss%10); line[n]=0;
-        parse_line(line);                       /* same path as "set HH:MM:SS" */
+        parse_line(line);
+        s_ntp_synced = 1;
         uart_puts("NTP: clock set "); uart_puts(line + 4); uart_puts("\r\n");
+    } else if (ev == MG_EV_ERROR) {
+        uart_puts("NTP: error "); uart_puts(ev_data ? (char *) ev_data : "?"); uart_puts("\r\n");
+        s_sntp = NULL;
     } else if (ev == MG_EV_CLOSE) {
         s_sntp = NULL;
     }
 }
+
 static void sntp_timer(void *arg) {
+    static uint32_t tick, attempts;
     struct mg_mgr *mgr = (struct mg_mgr *) arg;
-    if (s_sntp == NULL) s_sntp = mg_sntp_connect(mgr, NTP_URL, sntp_fn, NULL);
+    if (s_ntp_synced && (++tick % 30u) != 0u) return;     /* fast retry, then re-sync */
+    if (s_sntp != NULL) { s_sntp->is_closing = 1; s_sntp = NULL; }  /* drop a silent attempt */
+    const char *url;
+    if (s_ntpurl[0]) {
+        url = s_ntpurl;                                   /* DHCP-advertised NTP (IP) */
+    } else if (attempts >= 4u && s_mif.gw) {
+        ip4_url(s_gwurl, s_mif.gw, 123);                  /* fallback: the gateway/router */
+        url = s_gwurl;
+        if (attempts == 4u) { uart_puts("NTP: falling back to gateway "); uart_puts(s_gwurl); uart_puts("\r\n"); }
+    } else {
+        url = NTP_URL;
+    }
+    attempts++;
+    s_sntp = mg_sntp_connect(mgr, url, sntp_fn, NULL);
     if (s_sntp != NULL) mg_sntp_request(s_sntp);
+}
+
+/* Interface event handler: capture DHCP-assigned DNS/SNTP, and kick off the
+ * first time-sync once the stack actually reaches the READY state. */
+static void mif_fn(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
+    (void) ifp;
+    if (ev == MG_TCPIP_EV_DHCP_DNS) {
+        ip4_url(s_dnsurl, *(uint32_t *) ev_data, 53);
+        s_mgr.dns4.url = s_dnsurl;
+        uart_puts("NET: DHCP DNS  "); uart_puts(s_dnsurl); uart_puts("\r\n");
+    } else if (ev == MG_TCPIP_EV_DHCP_SNTP) {
+        ip4_url(s_ntpurl, *(uint32_t *) ev_data, 123);
+        uart_puts("NET: DHCP SNTP "); uart_puts(s_ntpurl); uart_puts("\r\n");
+    } else if (ev == MG_TCPIP_EV_STATE_CHANGE) {
+        if (*(uint8_t *) ev_data == MG_TCPIP_STATE_READY) {
+            setup_dns();
+            sntp_timer(&s_mgr);                           /* network is truly up now */
+        }
+    }
 }
 #endif
 
 #if ENABLE_WS
 static struct mg_connection *s_ws;
+
+static int wsapp(char *dst, int pos, int cap, const char *src) {
+    while (src && *src && pos < cap - 1) dst[pos++] = *src++;
+    return pos;
+}
+
+/* Turn a relay frame like
+ *   {"message":{"host":"192.168.1.1","status":"down","since":"jun/26/2026 14:57:00"}}
+ * into  HOST 192.168.1.1 DOWN SINCE JUN/26/2026 14:57:00  (uppercase, so it's
+ * visually distinct from the mixed-case netmsg the ESP32 sends). Non-matching
+ * frames are forwarded as-is. */
 static void ws_fn(struct mg_connection *c, int ev, void *ev_data) {
     (void) c;
     if (ev == MG_EV_WS_OPEN) {
         uart_puts("WS: connected\r\n");
     } else if (ev == MG_EV_WS_MSG) {
         struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
-        char line[160]; int n = 0;
-        const char pre[] = "netmsg ";
-        for (; pre[n]; n++) line[n] = pre[n];
-        for (size_t i = 0; i < wm->data.len && n < (int)sizeof(line) - 1; i++)
-            line[n++] = wm->data.buf[i];
+        char line[256]; int n = 0;
+        n = wsapp(line, n, (int) sizeof(line), "netmsg ");
+
+        char *host   = mg_json_get_str(wm->data, "$.message.host");
+        char *status = mg_json_get_str(wm->data, "$.message.status");
+        char *since  = mg_json_get_str(wm->data, "$.message.since");
+
+        if (host && status && since) {
+            n = wsapp(line, n, (int) sizeof(line), "HOST ");
+            n = wsapp(line, n, (int) sizeof(line), host);
+            if (n < (int) sizeof(line) - 1) line[n++] = ' ';
+            n = wsapp(line, n, (int) sizeof(line), status);
+            n = wsapp(line, n, (int) sizeof(line), " SINCE ");
+            n = wsapp(line, n, (int) sizeof(line), since);
+        } else {
+            for (size_t i = 0; i < wm->data.len && n < (int) sizeof(line) - 1; i++)
+                line[n++] = wm->data.buf[i];
+        }
         line[n] = 0;
-        parse_line(line);                       /* same path as "netmsg ..." (gated) */
+        for (int i = 7; line[i]; i++)                 /* uppercase the message body */
+            if (line[i] >= 'a' && line[i] <= 'z') line[i] = (char)(line[i] - 32);
+        parse_line(line);                             /* netmsg path (gated) */
+
+        free(host); free(status); free(since);
     } else if (ev == MG_EV_CLOSE || ev == MG_EV_ERROR) {
         s_ws = NULL;
     }
@@ -566,10 +666,15 @@ static void net_task(void *arg) {
     s_mif.driver = &s_genet_driver;
     s_mif.driver_data = NULL;
     s_mif.ip = 0;                          /* 0 => DHCP */
+#if ENABLE_NTP
+    s_mif.enable_req_dns  = true;          /* ask DHCP for a DNS server   */
+    s_mif.enable_req_sntp = true;          /* ask DHCP for an SNTP server  */
+    s_mif.fn = mif_fn;                     /* capture them as they arrive  */
+#endif
     mg_tcpip_init(&s_mgr, &s_mif);
     mg_http_listen(&s_mgr, "http://0.0.0.0:80", ev_handler, NULL);
 #if ENABLE_NTP
-    mg_timer_add(&s_mgr, 3600000, MG_TIMER_REPEAT, sntp_timer, &s_mgr);   /* hourly re-sync */
+    mg_timer_add(&s_mgr, 15000, MG_TIMER_REPEAT, sntp_timer, &s_mgr);     /* retry/re-sync */
 #endif
 #if ENABLE_WS
     mg_timer_add(&s_mgr, 3000, MG_TIMER_REPEAT | MG_TIMER_RUN_NOW, ws_timer, &s_mgr);  /* connect/keep-alive */
@@ -583,9 +688,6 @@ static void net_task(void *arg) {
             last = s_mif.ip;
             if (s_mif.ip) {
                 uart_puts("NET: ready  http://"); put_ip(s_mif.ip); uart_puts("/\r\n");
-#if ENABLE_NTP
-                sntp_timer(&s_mgr);              /* first sync as soon as DHCP gives an IP */
-#endif
             }
         }
         vTaskDelay(1);

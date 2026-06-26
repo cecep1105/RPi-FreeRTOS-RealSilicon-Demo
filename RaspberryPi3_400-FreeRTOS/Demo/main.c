@@ -35,7 +35,7 @@ static void  up_hex(uint64_t v){ uart_puts("0x"); for(int i=7;i>=0;i--){ uint32_
 
 /* ---- command channel: parser -> clock owner --------------------------- */
 typedef enum { CMD_SETTIME, CMD_MSG, CMD_NETMSG, CMD_BRIGHT, CMD_QUERY, CMD_PRAYER, CMD_PRAYCLR, CMD_LIST } cmdtype_t;
-typedef struct { cmdtype_t type; int a, b, c; char text[101]; } cmd_t;
+typedef struct { cmdtype_t type; int a, b, c; char text[MSG_LENGTH+1]; } cmd_t;
 static QueueHandle_t g_cmdq;
 
 /* ---- shared display/sweep state --------------------------------------- */
@@ -50,7 +50,7 @@ volatile int g_step_dir    = 1;   /* 1 = CW, 0 = CCW                            
 volatile int g_step_sps    = 200; /* steps per second (1..1000)                 */
 static SemaphoreHandle_t g_spi_mutex;
 volatile int g_machine   = 1;     /* 1 = suppress echo/prompt (ESP32 link) */
-char  g_marquee[40] = "KNIGHT RIDER CLOCK"; /* text currently on the marquee */
+char  g_marquee[201] = "KNIGHT RIDER CLOCK"; /* text currently on the marquee */
 volatile int g_sweep_run = 1;
 volatile int g_sweep_ms  = 80;
 
@@ -263,7 +263,7 @@ static void vClockOwner(void *pv)
         /* rebuild the marquee once per second, choosing prayer announce vs message */
         if(g_secs != last_built_sec){
             const char *mt = imminent_prayer(g_secs, pbuf) ? pbuf : g_msg;
-            { int i=0; for(;mt[i]&&i<39;i++) g_marquee[i]=mt[i]; g_marquee[i]=0; }
+            { int i=0; for(;mt[i]&&i<(MSG_LENGTH-1);i++) g_marquee[i]=mt[i]; g_marquee[i]=0; }
             tlen = build_ticker(ticker, g_secs, mt);
             twpx = tlen * (FONT_W + 1);
             if(sx >= (uint32_t)twpx) sx = 0;
