@@ -25,6 +25,6 @@
 #define MG_ENABLE_FILE              0
 #define MG_ENABLE_DIRLIST           0
 #define MG_ENABLE_TCPIP_DRIVER_INIT 0
-#define MG_ENABLE_LOG               1
+#define MG_ENABLE_LOG               1   /* logs off: keep the USB bring-up trace clean (set 1 to re-enable) */
 
 #endif /* MONGOOSE_CONFIG_H */

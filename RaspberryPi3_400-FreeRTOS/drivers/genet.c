@@ -386,11 +386,16 @@ int genet_probe(void)
 }
 
 #else
-/* ===================== BCM2837 (Pi 2 / Pi 3): no GENET ================== */
-int genet_probe(void)    { uart_puts("GENET: Pi 4 / Pi 400 only\r\n"); return -1; }
-int genet_net_init(void) { return 0; }
-unsigned long genet_net_rx(void *d, unsigned long m) { (void)d; (void)m; return 0; }
-unsigned long genet_net_tx(const void *s, unsigned long l) { (void)s; (void)l; return 0; }
-int genet_net_up(void)   { return 0; }
-void genet_get_mac(unsigned char mac[6]) { for (int i=0;i<6;i++) mac[i]=0; }
+/* ============= BCM2837 (Pi 2 / Pi 3): Ethernet is USB-attached ==========
+ * No native GENET MAC here. The NIC is a LAN9514 (USB hub) + SMSC9512 (MAC)
+ * hanging off the DWC2 USB host. The same raw-frame rx/tx/up API the upper
+ * stack expects is provided by the DWC2/SMSC driver -- forward to it, so
+ * Mongoose, DHCP, the dashboard, NTP and WebSocket all work unchanged. */
+#include "usb_dwc2.h"
+int genet_probe(void)    { uart_puts("GENET: USB Ethernet (LAN9514/SMSC9512) on Pi 2/3\r\n"); return -1; }
+int genet_net_init(void) { return usbnet_init(); }
+unsigned long genet_net_rx(void *d, unsigned long m) { return usbnet_rx(d, m); }
+unsigned long genet_net_tx(const void *s, unsigned long l) { return usbnet_tx(s, l); }
+int genet_net_up(void)   { return usbnet_up(); }
+void genet_get_mac(unsigned char mac[6]) { usbnet_get_mac(mac); }
 #endif

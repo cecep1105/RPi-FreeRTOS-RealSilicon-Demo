@@ -19,6 +19,8 @@
 #include "stepper.h"
 #include "semphr.h"
 #include "genet.h"
+#include "usb_dwc2.h"
+
 
 #if (PERIPHERAL_BASE == 0xFE000000UL)
 #define BOARD_NAME "Pi 400 / Pi 4 (BCM2711)"
@@ -816,24 +818,16 @@ void main(void)
     uart_init();   
     uart_puts("\r\n=== Knight Rider Clock  (FreeRTOS milestone-6, " BOARD_NAME ", AArch64) ===\r\n");
     genet_probe();
-    // uart_puts("MAIN: A - past genet_probe\r\n");
-    // delay_us(20000);
-    // __asm__ volatile("msr daifclr, #4; isb");   /* unmask SError (DAIF.A) now */
-    // uart_puts("MAIN: B - survived SError unmask\r\n");
-    // delay_us(20000);
-
-
-
-
-
-
-
-
-
-
-
-
-
+    // usb_dwc2_probe();     /* Pi 3: power + identify the DWC2 USB host */
+    // usb_host_init();  
+    // usb_port_init(); 
+    // usb_enum_probe();     /* <-- add: Step 4, first control transfer */
+    // usb_hub_init();       /* <-- add: Step 5, address + configure the hub */
+    // usb_hub_scan();       /* <-- add: Step 6, power ports + reset the device */
+    // usb_eth_enum();       /* <-- add: Step 7, enumerate the Ethernet device */
+    // usb_eth_chip_probe();   /* <-- add: Step 8, SMSC register access */
+    // usb_eth_chip_init();    /* <-- add: Step 9, configure MAC + PHY + TX/RX */
+    // usb_eth_link_test();    /* <-- add: Step 10, link up + first frames */
 
 
     led_out_init();   /* LED sweep output: 74HC595 (default) or 8 GPIOs (LEDSWEEP=FULL) */

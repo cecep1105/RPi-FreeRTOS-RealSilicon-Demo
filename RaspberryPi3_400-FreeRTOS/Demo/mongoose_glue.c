@@ -60,6 +60,28 @@ extern char g_marquee[];   /* live HDMI marquee text (main.c) */
 #ifndef ENABLE_WS
 #define ENABLE_WS 1
 #endif
+
+/* ---- Static-IP fallback ------------------------------------------------
+ *  If no DHCP lease arrives within STATIC_DHCP_WAIT_MS, the interface comes
+ *  up on this fixed address instead. Edit these to match your network; set
+ *  STATIC_FALLBACK 0 for DHCP-only. (No effect once DHCP succeeds.) */
+#ifndef STATIC_FALLBACK
+#define STATIC_FALLBACK 1
+#endif
+#ifndef STATIC_DHCP_WAIT_MS
+#define STATIC_DHCP_WAIT_MS 15000
+#endif
+#define STATIC_IP4(a,b,c,d) ((uint32_t)(a) | ((uint32_t)(b)<<8) | \
+                             ((uint32_t)(c)<<16) | ((uint32_t)(d)<<24))
+#ifndef STATIC_IP
+#define STATIC_IP   STATIC_IP4(192,168,30,50)
+#endif
+#ifndef STATIC_MASK
+#define STATIC_MASK STATIC_IP4(255,255,255,0)
+#endif
+#ifndef STATIC_GW
+#define STATIC_GW   STATIC_IP4(192,168,30,254)
+#endif
 #ifndef WS_URL
 #define WS_URL "ws://172.16.10.36:4001/ws/netmon/?timeid=1234567890"
 #endif
@@ -682,8 +704,27 @@ static void net_task(void *arg) {
     uart_puts("NET: stack up, HTTP on :80, waiting for DHCP...\r\n");
 
     uint32_t last = 0xFFFFFFFFu;
+#if STATIC_FALLBACK
+    uint64_t t_up = mg_millis();
+    int fb_decided = 0;
+#endif
     for (;;) {
         mg_mgr_poll(&s_mgr, 1);
+#if STATIC_FALLBACK
+        if (!fb_decided) {
+            if (s_mif.ip) {
+                fb_decided = 1;                   /* DHCP got a lease; no fallback */
+            } else if (mg_millis() - t_up > STATIC_DHCP_WAIT_MS) {
+                s_mif.enable_dhcp_client = false; /* stop DHCP; stack uses static IP */
+                s_mif.ip   = STATIC_IP;           /* UP && !dhcp && ip -> IP -> READY */
+                s_mif.mask = STATIC_MASK;
+                s_mif.gw   = STATIC_GW;
+                uart_puts("NET: no DHCP -> static ");
+                put_ip(s_mif.ip); uart_puts(" gw "); put_ip(s_mif.gw); uart_puts("\r\n");
+                fb_decided = 1;
+            }
+        }
+#endif
         if (s_mif.ip != last) {
             last = s_mif.ip;
             if (s_mif.ip) {

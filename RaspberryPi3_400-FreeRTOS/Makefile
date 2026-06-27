@@ -7,10 +7,11 @@ endif
 CROSS ?= aarch64-none-elf
 CFLAGS =  -mcpu=cortex-a53 -mgeneral-regs-only -mstrict-align -fno-pic -ffreestanding -std=gnu99 -O2 -Wall -Wextra -I$(INCLUDEPATH1) -I$(INCLUDEPATH2) -I$(INCLUDEPATH3) -Idrivers -DPERIPHERAL_BASE=$(PBASE)
 
-# LED-sweep output backend:
+# LED-sweep output backend: 
 #   make               -> 74HC595 shift register, 3 GPIOs (DATA=17, CLOCK=27, LATCH=22)  [default]
 #   make LEDSWEEP=FULL  -> 8 direct GPIOs (original wiring)
 # Switch modes with a clean rebuild:  make clean && make LEDSWEEP=FULL
+
 LEDSWEEP ?= 595
 ifeq ($(LEDSWEEP),FULL)
   CFLAGS += -DLEDSWEEP_FULL
@@ -57,6 +58,7 @@ OBJS += build/la_render.o
 OBJS += build/sc_render.o
 
 OBJS +=build/genet.o
+OBJS +=build/usb_dwc2.o   
 OBJS +=build/serror.o
 
 OBJS +=build/mongoose.o
