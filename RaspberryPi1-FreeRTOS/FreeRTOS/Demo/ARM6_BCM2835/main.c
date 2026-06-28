@@ -32,6 +32,10 @@
 #include "qrcodegen.h"
 #include "timer.h"      /* sys_us(): 74HC595 bit-bang settle */
 
+#include "usb_dwc2.h"   
+
+
+
 extern int bcm2835_init(void);
 
 #define BOARD_NAME "Pi 1 (BCM2835, ARMv6)"
@@ -637,6 +641,29 @@ static void vButton(void *pv)
     }
 }
 
+
+
+static void vUsbTest(void *pv) {
+    (void)pv;
+    uart_puts("\r\n=== USB Ethernet bring-up test (Pi 1) ===\r\n");
+    int r = usbnet_init();          /* DWC2 host -> hub -> SMSC9512 -> link */
+    if (r > 0) uart_puts("USB TEST: link UP, driver OK\r\n");
+    else       uart_puts("USB TEST: bring-up FAILED (see log)\r\n");
+    for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
 /* ======================================================================= */
 int main(void)
 {
@@ -644,6 +671,10 @@ int main(void)
     uart_init();
     uart_puts("\r\n=== Knight Rider Clock  (FreeRTOS, " BOARD_NAME ") ===\r\n");
     tm1637_init(); max_init();
+
+    uart_puts("\r\n=== USB bring-up (pre-scheduler) ===\r\n");
+    int usb = usbnet_init();
+    uart_puts(usb > 0 ? "USB TEST: link UP\r\n" : "USB TEST: FAILED (see log)\r\n");
 
     g_spi_mutex = xSemaphoreCreateMutex();
     g_cmdq = xQueueCreate(8, sizeof(cmd_t));

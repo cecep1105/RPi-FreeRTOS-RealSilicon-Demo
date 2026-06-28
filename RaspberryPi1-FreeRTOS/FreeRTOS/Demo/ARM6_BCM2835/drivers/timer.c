@@ -14,3 +14,13 @@ uint64_t sys_us(void) {
     do { hi = *STIMER_CHI; lo = *STIMER_CLO; hi2 = *STIMER_CHI; } while (hi != hi2);
     return ((uint64_t)hi << 32) | lo;
 }
+
+/* Microsecond busy-wait built on the 1 MHz system timer. Used by the USB
+ * Ethernet driver (usb_dwc2.c) and the GENET shim. Pre-scheduler safe. */
+void delay_us(uint32_t us) {
+    uint64_t start = sys_us();
+    uint32_t guard = us * 200u + 100000u;   /* bail if the timer never advances */
+    while ((sys_us() - start) < (uint64_t)us) {
+        if (guard-- == 0u) break;
+    }
+}
