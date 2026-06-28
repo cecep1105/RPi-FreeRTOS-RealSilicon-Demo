@@ -904,6 +904,7 @@ int usb_eth_chip_probe(void)
 #define SMSC_MAC_CR_TXEN     0x00000008u
 #define SMSC_MAC_CR_RXEN     0x00000004u
 #define SMSC_MAC_CR_FDPX     0x00100000u
+#define SMSC_MAC_CR_BCAST    0x00000800u   /* accept broadcast frames (DHCP/ARP) */
 
 #define SMSC_MII_BUSY        0x01u
 #define SMSC_MII_WRITE       0x02u
@@ -1028,8 +1029,11 @@ int usb_eth_chip_init(void)
     smsc_mdio_write(SMSC_PHY_ADDR, MII_ADVERTISE, ADVERTISE_ALL);
     smsc_mdio_write(SMSC_PHY_ADDR, MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART);
 
-    /* 5. Enable transmit and receive (duplex is set when link comes up). */
-    smsc_write_reg(SMSC_MAC_CR, SMSC_MAC_CR_TXEN | SMSC_MAC_CR_RXEN);
+    /* 5. Enable transmit and receive (duplex is set when link comes up).
+     *    BCAST is required or the chip's perfect filter drops ALL broadcast
+     *    frames -- DHCP OFFER and ARP who-has are broadcast, so without this
+     *    DHCP never completes and the host is unpingable (RXSTAT frames=0). */
+    smsc_write_reg(SMSC_MAC_CR, SMSC_MAC_CR_TXEN | SMSC_MAC_CR_RXEN | SMSC_MAC_CR_BCAST);
     smsc_write_reg(SMSC_TX_CFG, SMSC_TX_CFG_ON);
 
     uart_puts("SMSC: ===== CHIP CONFIGURED (TX/RX on, autoneg started) =====\r\n");
@@ -1277,14 +1281,69 @@ static int bulk_in_once(uint8_t ep, uint32_t mps, void *buf, int len, uint8_t *t
 unsigned long usbnet_rx(void *buf, unsigned long max)
 {
     if (g_eth_addr == 0) return 0;
+
+    uint64_t _t = sys_us();
     int actual = bulk_in_once(g_eth_bulk_in, g_eth_in_mps, s_rxbuf, (int)sizeof(s_rxbuf), &g_in_toggle);
+    uint32_t _dt = (uint32_t)(sys_us() - _t);
+
+    /* --- RX poll stats (once/sec): calls, frames, avg/max poll us, near-bail count --- */
+    static uint32_t s_calls, s_frames, s_sum, s_max, s_bail;
+    static uint64_t s_t0;
+    s_calls++; s_sum += _dt; if (_dt > s_max) s_max = _dt;
+    if (actual > 4) s_frames++;
+    if (_dt >= 700u) s_bail++;
+    if (s_t0 == 0) s_t0 = _t;
+    if (_t - s_t0 >= 1000000ULL) {
+        uart_puts("RXSTAT calls="); put_dec(s_calls);
+        uart_puts(" frames=");      put_dec(s_frames);
+        uart_puts(" avgus=");       put_dec(s_calls ? s_sum / s_calls : 0);
+        uart_puts(" maxus=");       put_dec(s_max);
+        uart_puts(" bails=");       put_dec(s_bail);
+        uart_puts("\r\n");
+        s_calls = s_frames = s_sum = s_max = s_bail = 0; s_t0 = _t;
+    }
+
     if (actual <= 4) return 0;                          /* error, empty, or ZLP */
 
     uint32_t rxs = (uint32_t)s_rxbuf[0] | ((uint32_t)s_rxbuf[1]<<8) |
                    ((uint32_t)s_rxbuf[2]<<16) | ((uint32_t)s_rxbuf[3]<<24);
-    if (rxs & RX_STS_ERROR) return 0;
     int fl = (int)((rxs & RX_STS_FL_MASK) >> 16);       /* length incl 4-byte FCS */
     int framelen = fl - 4;
+
+    /* --- per-frame diag, capped: what is actually arriving? --- */
+    static int s_fd = 0;
+    if (s_fd < 40) {
+        s_fd++;
+        uint16_t et = (framelen >= 14) ?
+            (uint16_t)(((uint16_t)s_rxbuf[4+12] << 8) | s_rxbuf[4+13]) : 0;
+        uart_puts("RXF len="); put_dec((uint32_t)framelen);
+        uart_puts(" actual="); put_dec((uint32_t)actual);
+        uart_puts(" type=");   put_hex16(et);
+        uart_puts(" dst=");    put_hex16((uint16_t)(((uint16_t)s_rxbuf[4]<<8)|s_rxbuf[5]));
+        uart_puts(" rxs=");    put_hex32(rxs);
+        uart_puts(" max=");    put_dec((uint32_t)max);
+        uart_puts((rxs & RX_STS_ERROR) ? " ERR\r\n" : (((unsigned long)framelen > max) ? " TOOBIG\r\n" : " ok\r\n"));
+    }
+
+    /* --- deep dump for OFFER-sized IP frames: are the body bytes coherent? --- */
+    static int s_hd = 0;
+    {
+        uint16_t et = (framelen >= 14) ?
+            (uint16_t)(((uint16_t)s_rxbuf[4+12] << 8) | s_rxbuf[4+13]) : 0;
+        if (s_hd < 4 && et == 0x0800 && framelen > 300) {
+            s_hd++;
+            int n = (actual < 60) ? actual : 60;   /* eth14+ip20+udp8+dhcp14=56 */
+            uart_puts("HEXDUMP actual="); put_dec((uint32_t)actual);
+            uart_puts(" framelen="); put_dec((uint32_t)framelen); uart_puts("\r\n");
+            for (int i = 0; i < n; i++) {
+                put_hex8(s_rxbuf[i]);
+                uart_puts((i % 16 == 15) ? "\r\n" : " ");
+            }
+            uart_puts("\r\n");
+        }
+    }
+
+    if (rxs & RX_STS_ERROR) return 0;
     if (framelen <= 0 || (unsigned long)framelen > max) return 0;
     u_memcpy(buf, s_rxbuf + 4, (unsigned long)framelen);
     return (unsigned long)framelen;

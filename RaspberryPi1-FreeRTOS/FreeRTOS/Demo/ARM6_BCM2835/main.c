@@ -54,7 +54,7 @@ volatile uint8_t g_led_display = 0;   /* current 8-LED state (sweep or manual) *
 volatile uint8_t g_led_mask    = 0;   /* manual override mask; 0 = auto sweep   */
 static SemaphoreHandle_t g_spi_mutex;
 volatile int g_machine   = 0;         /* 1 = suppress echo/prompt (ESP32 link)  */
-static char  g_marquee[40] = "KNIGHT RIDER CLOCK";
+char  g_marquee[200] = "KNIGHT RIDER CLOCK";
 volatile int g_sweep_run = 1;
 volatile int g_sweep_ms  = 80;
 
@@ -519,7 +519,7 @@ static void qr_request(const char *p, int showreq)
     g_qr_req = showreq; uart_puts("ok qr\r\n");
 }
 
-static void parse_line(char *line)
+void parse_line(char *line)
 {
     const char *p = line; skip_sp(&p);
     char cw[16]; if(!word(&p,cw,sizeof cw)) return; skip_sp(&p);
@@ -689,7 +689,9 @@ int main(void)
     xTaskCreate(vButton,    "btn",    512, NULL, 1, NULL);
     xTaskCreate(vHdmi,      "hdmi",  1024, NULL, 1, NULL);
     xTaskCreate(vUartCmd,   "uart",  1024, NULL, 2, NULL);
-
+    
+    void net_start(void);   /* defined in mongoose_glue.c */
+    net_start();
     vTaskStartScheduler();
     while(1);
     return 0;
