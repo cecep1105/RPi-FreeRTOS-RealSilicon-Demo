@@ -39,14 +39,14 @@
 extern int bcm2835_init(void);
 
 #define BOARD_NAME "Pi 1 (BCM2835, ARMv6)"
-#define MSG_LENGTH 200
+#define MSG_LENGTH 501
 
 static char  upc(char c){ return (c>='a'&&c<='z') ? (char)(c-32) : c; }
 static void  up_dec(uint32_t v){ char b[11]; int i=10; b[10]=0; if(!v){uart_puts("0");return;} while(v&&i){b[--i]='0'+(v%10);v/=10;} uart_puts(&b[i]); }
 
 /* ---- command channel: parser -> clock owner --------------------------- */
 typedef enum { CMD_SETTIME, CMD_MSG, CMD_NETMSG, CMD_BRIGHT, CMD_QUERY, CMD_PRAYER, CMD_PRAYCLR, CMD_LIST } cmdtype_t;
-typedef struct { cmdtype_t type; int a, b, c; char text[101]; } cmd_t;
+typedef struct { cmdtype_t type; int a, b, c; char text[MSG_LENGTH+1]; } cmd_t;
 static QueueHandle_t g_cmdq;
 
 /* ---- shared display/sweep state --------------------------------------- */
@@ -245,7 +245,7 @@ static void vClockOwner(void *pv)
 
         if(g_secs != last_built_sec){
             const char *mt = imminent_prayer(g_secs, pbuf) ? pbuf : g_msg;
-            { int i=0; for(;mt[i]&&i<39;i++) g_marquee[i]=mt[i]; g_marquee[i]=0; }
+            { int i=0; for(;mt[i]&&i<(MSG_LENGTH-1);i++) g_marquee[i]=mt[i]; g_marquee[i]=0; }
             tlen = build_ticker(ticker, g_secs, mt);
             twpx = tlen * (FONT_W + 1);
             if(sx >= (uint32_t)twpx) sx = 0;

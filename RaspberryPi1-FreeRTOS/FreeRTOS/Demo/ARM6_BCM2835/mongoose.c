@@ -8376,12 +8376,6 @@ static void rx_dhcp_client(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   uint8_t *p = (uint8_t *) pkt->pay.buf,
           *end = (uint8_t *) &pkt->pay.buf[pkt->pay.len];
   // min header length checked at payload calculation, options are optional
-  {
-    const uint8_t *_x = (const uint8_t *) &pkt->dhcp->xid;
-    MG_INFO(("DHCP client: paylen=%u xid_pkt=%02x%02x%02x%02x xid_ours=%02x%02x%02x%02x",
-             (unsigned) pkt->pay.len, _x[0], _x[1], _x[2], _x[3],
-             ifp->mac[2], ifp->mac[3], ifp->mac[4], ifp->mac[5]));
-  }
   if (memcmp(&pkt->dhcp->xid, ifp->mac + 2, sizeof(pkt->dhcp->xid))) return;
   while (p + 1 < end && p[0] != 255) {  // Parse options, get #1; RFC-2132 9
     if (p[0] == 1 && p[1] == 4 && p + 6 < end) {  // Mask, 3.3
@@ -8406,9 +8400,6 @@ static void rx_dhcp_client(struct mg_tcpip_if *ifp, struct pkt *pkt) {
     p += p[1] + 2;
   }
   // Process message type, RFC-1533 (9.4); RFC-2131 (3.1, 4)
-  MG_INFO(("DHCP rx: type=%u state=%u yi=%M ip=%M gw=%M mask=%M lease=%u",
-           msgtype, ifp->state, mg_print_ip4, &pkt->dhcp->yiaddr,
-           mg_print_ip4, &ip, mg_print_ip4, &gw, mg_print_ip4, &mask, lease));
   if (msgtype == 6 && ifp->ip == ip) {  // DHCPNACK, release IP
     ifp->state = MG_TCPIP_STATE_UP, ifp->ip = 0;
   } else if (msgtype == 2 && ifp->state == MG_TCPIP_STATE_UP && ip && gw &&
@@ -9407,12 +9398,6 @@ static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
 static void rx_ip(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   uint8_t ihl;
   uint16_t frag, len;
-  {
-    const uint8_t *_b = (const uint8_t *) pkt->ip;
-    if (pkt->pay.len >= 10)
-      MG_INFO(("rx_ip in: paylen=%u ip0=%02x ihl=%x proto=%u csum?",
-               (unsigned) pkt->pay.len, _b[0], (_b[0] & 0x0F), _b[9]));
-  }
   if (pkt->pay.len < sizeof(*pkt->ip)) return;  // Truncated
   if ((pkt->ip->ver >> 4) != 4) return;         // Not IP
   ihl = pkt->ip->ver & 0x0F;

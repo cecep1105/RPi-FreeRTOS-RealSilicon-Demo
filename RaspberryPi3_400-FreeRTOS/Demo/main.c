@@ -29,7 +29,7 @@
 #endif
 
 
-#define MSG_LENGTH 200
+#define MSG_LENGTH 501
 
 static char  upc(char c){ return (c>='a'&&c<='z') ? (char)(c-32) : c; }
 static void  up_dec(uint32_t v){ char b[11]; int i=10; b[10]=0; if(!v){uart_puts("0");return;} while(v&&i){b[--i]='0'+(v%10);v/=10;} uart_puts(&b[i]); }
