@@ -32,7 +32,7 @@ CFLAGS=-nostartfiles -DPERIPHERAL_BASE=0x20000000UL
 LEDSWEEP ?= 595
 ifeq ($(LEDSWEEP),FULL)
 CFLAGS+=-DLEDSWEEP_FULL
-CFLAGS+=-march=armv6z -mno-unaligned-access
+CFLAGS+=-march=armv6z
 endif
 
 # Add linking flags

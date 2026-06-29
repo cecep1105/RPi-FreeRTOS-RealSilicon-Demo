@@ -231,7 +231,7 @@ void fb_clock_big(const char *s, uint32_t fg, uint32_t bg)
  *  re-enters from the right edge. Flicker-free: every band pixel is        *
  *  written exactly once per draw (opaque cells + bg margins, no clear).    *
  * ======================================================================= */
-#define MSG_MAX 200
+#define MSG_MAX 500
 static char mq_text[MSG_MAX+1] = "";
 static int  mq_len  = 0;
 static int  mq_head = -1;                 /* scroll offset (px); -1 = (re)start */

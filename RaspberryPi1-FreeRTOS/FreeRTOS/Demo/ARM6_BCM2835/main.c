@@ -39,7 +39,7 @@
 extern int bcm2835_init(void);
 
 #define BOARD_NAME "Pi 1 (BCM2835, ARMv6)"
-#define MSG_LENGTH 501
+#define MSG_LENGTH 500
 
 static char  upc(char c){ return (c>='a'&&c<='z') ? (char)(c-32) : c; }
 static void  up_dec(uint32_t v){ char b[11]; int i=10; b[10]=0; if(!v){uart_puts("0");return;} while(v&&i){b[--i]='0'+(v%10);v/=10;} uart_puts(&b[i]); }
@@ -54,7 +54,7 @@ volatile uint8_t g_led_display = 0;   /* current 8-LED state (sweep or manual) *
 volatile uint8_t g_led_mask    = 0;   /* manual override mask; 0 = auto sweep   */
 static SemaphoreHandle_t g_spi_mutex;
 volatile int g_machine   = 0;         /* 1 = suppress echo/prompt (ESP32 link)  */
-char  g_marquee[200] = "KNIGHT RIDER CLOCK";
+char  g_marquee[MSG_LENGTH+1] = "KNIGHT RIDER CLOCK";
 volatile int g_sweep_run = 1;
 volatile int g_sweep_ms  = 80;
 
@@ -84,7 +84,7 @@ volatile int    g_qr_on  = 0;     /* 1 = QR currently on the HDMI screen        
  * 'netmsg' commands (WebSocket bridge) reach the MAX7219 + HDMI marquee. Manual
  * 'msg' is never gated. The WebSocket link on the ESP32 keeps running either way.*/
 #define BTN_MSG_PIN  21
-static char     g_base_msg[MSG_LENGTH] = "RASPBERRY PI 1 FREERTOS BAREMETAL CLOCK";
+static char     g_base_msg[MSG_LENGTH+1] = "RASPBERRY PI 1 FREERTOS BAREMETAL CLOCK";
 volatile int    g_msg_show       = 1;  /* 1 = show WebSocket (netmsg) messages    */
 volatile int    g_msg_show_dirty = 0;  /* set by button task, serviced by clock   */
 

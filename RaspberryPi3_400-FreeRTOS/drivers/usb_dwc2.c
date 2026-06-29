@@ -70,11 +70,11 @@ static int mbox_call(uint32_t ch)
 {
     uint32_t addr = ((uint32_t)(uintptr_t)s_mbox & ~0xFu) | (ch & 0xFu);
     while (MBOX_STATUS_ & MBOX_FULL_) {}
-    __asm__ volatile("dsb sy" ::: "memory");
+    USB_DSB();
     MBOX_WRITE_ = addr;
     for (;;) {
         while (MBOX_STATUS_ & MBOX_EMPTY_) {}
-        __asm__ volatile("dsb sy" ::: "memory");
+        USB_DSB();
         if (MBOX_READ_ == addr) return s_mbox[1] == 0x80000000u;
     }
 }
@@ -427,8 +427,9 @@ static int chan_xfer(int ch, uint8_t dev_addr, uint8_t ep, int dir_in, uint32_t 
             if (hcint & HCINT_CHHLTD) break;
             if (sys_us() - t0 > 1000000ULL) { chan_disable(ch); return -2; }
         }
+        USB_DSB();   /* drain DWC2 DMA writes before the CPU reads the buffer
+                        (ARMv6 has no implicit ordering here; stale reads otherwise) */
         usb_wr(base + HCINT, 0xFFFFFFFFu);
-
         if (hcint & HCINT_XFERCOMPL) return 0;
         if (hcint & HCINT_STALL)     return -1;
         /* NAK / NYET / transaction error -> back off and retry. */
@@ -515,6 +516,7 @@ int usb_enum_probe(void)
 
 static uint8_t g_hub_addr;     /* USB address assigned to the LAN9514 hub */
 static uint8_t g_hub_ports;    /* number of downstream ports it reports   */
+static uint8_t g_hub_pwr2good; /* bPwrOn2PwrGood from hub descriptor (x2ms)*/
 
 /* ---- standard-request helpers (all on EP0, channel 0) ---- */
 static int get_descriptor(uint8_t addr, uint32_t mps, uint8_t type, uint8_t index,
@@ -597,7 +599,11 @@ int usb_hub_init(void)
     if (get_hub_descriptor(g_hub_addr, s_descbuf, 8) != 0) {
         uart_puts("USB: hub descriptor read FAILED\r\n");  return -1;
     }
-    g_hub_ports = s_descbuf[2];                        /* bNbrPorts */
+    g_hub_ports    = s_descbuf[2];                     /* bNbrPorts */
+    g_hub_pwr2good = s_descbuf[5];                      /* bPwrOn2PwrGood (x2ms) */
+    uint16_t hubchar = (uint16_t)(s_descbuf[3] | (s_descbuf[4] << 8));
+    uart_puts("USB: hubChar="); put_hex16(hubchar);
+    uart_puts(" pwr2good=");    put_dec((uint32_t)g_hub_pwr2good * 2); uart_puts("ms\r\n");
     uart_puts("USB: ===== HUB READY, ports=");
     put_dec(g_hub_ports);
     uart_puts(" =====\r\n");
@@ -652,16 +658,33 @@ int usb_hub_scan(void)
     /* Power every downstream port. */
     uart_puts("USB: powering hub ports...\r\n");
     for (uint16_t p = 1; p <= g_hub_ports; p++) hub_set_feature(g_hub_addr, HUBF_PORT_POWER, p);
-    delay_us(150000);                                  /* power-good settle */
 
-    /* Find the first connected port (the internal Ethernet, with USB-A empty). */
-    int found = 0;
-    for (uint16_t p = 1; p <= g_hub_ports && !found; p++) {
-        uint16_t st = 0;
-        if (hub_port_status(g_hub_addr, p, &st) != 0) continue;
-        uart_puts("USB: port "); put_dec(p); uart_puts(" status="); put_hex16(st);
-        if (!(st & PS_CONNECTION)) { uart_puts("\r\n"); continue; }
-        uart_puts(" CONNECTED\r\n");
+    /* Honor the hub's own power-on-to-power-good time (x2ms), floor 100ms. */
+    uint32_t settle = (uint32_t)g_hub_pwr2good * 2000u;
+    if (settle < 100000u) settle = 100000u;
+    delay_us(settle);
+
+    /* Poll for the first connected downstream port for up to ~2s. The LAN9514's
+       internal Ethernet bridge can assert connect later than a single read. */
+    int      found = 0;
+    uint16_t conn_p = 0, st = 0;
+    uint64_t t0 = sys_us();
+    int swept = 0;
+    while (conn_p == 0 && (uint32_t)(sys_us() - t0) < 2000000u) {
+        for (uint16_t p = 1; p <= g_hub_ports; p++) {
+            uint16_t s = 0;
+            if (hub_port_status(g_hub_addr, p, &s) != 0) continue;
+            if (!swept) { uart_puts("USB: port "); put_dec(p);
+                          uart_puts(" status="); put_hex16(s); uart_puts("\r\n"); }
+            if (s & PS_CONNECTION) { conn_p = p; st = s; break; }
+        }
+        swept = 1;                                     /* print the sweep once */
+        if (conn_p == 0) delay_us(100000);
+    }
+
+    if (conn_p != 0) {
+        uint16_t p = conn_p;
+        uart_puts("USB: port "); put_dec(p); uart_puts(" CONNECTED status="); put_hex16(st); uart_puts("\r\n");
 
         /* Debounce, then reset the port. */
         hub_clear_feature(g_hub_addr, HUBF_C_PORT_CONNECTION, p);
@@ -881,6 +904,7 @@ int usb_eth_chip_probe(void)
 #define SMSC_MAC_CR_TXEN     0x00000008u
 #define SMSC_MAC_CR_RXEN     0x00000004u
 #define SMSC_MAC_CR_FDPX     0x00100000u
+#define SMSC_MAC_CR_BCAST    0x00000800u   /* accept broadcast frames (DHCP/ARP) */
 
 #define SMSC_MII_BUSY        0x01u
 #define SMSC_MII_WRITE       0x02u
@@ -1005,8 +1029,11 @@ int usb_eth_chip_init(void)
     smsc_mdio_write(SMSC_PHY_ADDR, MII_ADVERTISE, ADVERTISE_ALL);
     smsc_mdio_write(SMSC_PHY_ADDR, MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART);
 
-    /* 5. Enable transmit and receive (duplex is set when link comes up). */
-    smsc_write_reg(SMSC_MAC_CR, SMSC_MAC_CR_TXEN | SMSC_MAC_CR_RXEN);
+    /* 5. Enable transmit and receive (duplex is set when link comes up).
+     *    BCAST is required or the chip's perfect filter drops ALL broadcast
+     *    frames -- DHCP OFFER and ARP who-has are broadcast, so without this
+     *    DHCP never completes and the host is unpingable. */
+    smsc_write_reg(SMSC_MAC_CR, SMSC_MAC_CR_TXEN | SMSC_MAC_CR_RXEN | SMSC_MAC_CR_BCAST);
     smsc_write_reg(SMSC_TX_CFG, SMSC_TX_CFG_ON);
 
     uart_puts("SMSC: ===== CHIP CONFIGURED (TX/RX on, autoneg started) =====\r\n");
@@ -1254,14 +1281,17 @@ static int bulk_in_once(uint8_t ep, uint32_t mps, void *buf, int len, uint8_t *t
 unsigned long usbnet_rx(void *buf, unsigned long max)
 {
     if (g_eth_addr == 0) return 0;
+
     int actual = bulk_in_once(g_eth_bulk_in, g_eth_in_mps, s_rxbuf, (int)sizeof(s_rxbuf), &g_in_toggle);
+
     if (actual <= 4) return 0;                          /* error, empty, or ZLP */
 
     uint32_t rxs = (uint32_t)s_rxbuf[0] | ((uint32_t)s_rxbuf[1]<<8) |
                    ((uint32_t)s_rxbuf[2]<<16) | ((uint32_t)s_rxbuf[3]<<24);
-    if (rxs & RX_STS_ERROR) return 0;
     int fl = (int)((rxs & RX_STS_FL_MASK) >> 16);       /* length incl 4-byte FCS */
     int framelen = fl - 4;
+
+    if (rxs & RX_STS_ERROR) return 0;
     if (framelen <= 0 || (unsigned long)framelen > max) return 0;
     u_memcpy(buf, s_rxbuf + 4, (unsigned long)framelen);
     return (unsigned long)framelen;

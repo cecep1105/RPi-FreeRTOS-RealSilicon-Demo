@@ -52,7 +52,7 @@ volatile int g_step_dir    = 1;   /* 1 = CW, 0 = CCW                            
 volatile int g_step_sps    = 200; /* steps per second (1..1000)                 */
 static SemaphoreHandle_t g_spi_mutex;
 volatile int g_machine   = 1;     /* 1 = suppress echo/prompt (ESP32 link) */
-char  g_marquee[201] = "KNIGHT RIDER CLOCK"; /* text currently on the marquee */
+char  g_marquee[MSG_LENGTH] = "KNIGHT RIDER CLOCK"; /* text currently on the marquee */
 volatile int g_sweep_run = 1;
 volatile int g_sweep_ms  = 80;
 

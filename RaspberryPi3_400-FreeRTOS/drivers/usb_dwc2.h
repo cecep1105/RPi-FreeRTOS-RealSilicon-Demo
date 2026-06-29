@@ -170,8 +170,26 @@
 #define USB_PID_SETUP             3u
 
 /* DWC2 DMA sees RAM through the VideoCore interconnect: program HCDMA with the
- * uncached *bus* alias of the buffer, not the ARM physical address. */
-#define USB_BUS_ADDR(p)           (((uint32_t)(uintptr_t)(p)) | 0xC0000000u)
+ * *bus* alias of the buffer, not the ARM physical address. The correct alias
+ * differs by board because the ARM reaches SDRAM differently:
+ *   - Pi 3/400 (AArch64): ARM caches are on but the USB buffers are mapped
+ *     non-cacheable, so the uncached 0xC0000000 alias is coherent.
+ *   - Pi 1 (ARMv6, BCM2835): the ARM goes through the VideoCore L2 cache, so
+ *     DMA must use the L2-COHERENT 0x40000000 alias. The uncached 0xC0000000
+ *     alias bypasses L2 and reads/writes stale data (intermittent garbage). */
+#if defined(__aarch64__)
+#  define USB_BUS_ADDR(p)         (((uint32_t)(uintptr_t)(p)) | 0xC0000000u)
+#else
+#  define USB_BUS_ADDR(p)         (((uint32_t)(uintptr_t)(p)) | 0x40000000u)
+#endif
+
+/* Data Synchronisation Barrier, portable across AArch64 (Pi 3/400) and
+ * ARMv6 (Pi 1, ARM1176): same ordering guarantee, different encoding. */
+#if defined(__aarch64__)
+#  define USB_DSB() __asm__ volatile("dsb sy" ::: "memory")
+#else
+#  define USB_DSB() __asm__ volatile("mcr p15, 0, %0, c7, c10, 4" :: "r"(0) : "memory")
+#endif
 
 /* ---- MMIO accessors (DWC2 is Device memory: strongly ordered) ---- */
 static inline uint32_t usb_rd(uint32_t off)
@@ -181,7 +199,7 @@ static inline uint32_t usb_rd(uint32_t off)
 static inline void usb_wr(uint32_t off, uint32_t val)
 {
     *(volatile uint32_t *)(USB_BASE + off) = val;
-    __asm__ volatile("dsb sy" ::: "memory");
+    USB_DSB();
 }
 
 /* Power the USB controller (VideoCore mailbox) and report the core identity
